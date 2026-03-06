@@ -1,14 +1,18 @@
 """
-Dialogue State Tracker — FSM
+Dialogue State Tracker — FSM (v2 — ML-calibrated)
 
 Tracks the conversation state across turns:
 - Current intent and filled/missing slots
 - State transitions: GREETING → COLLECTING → CONFIRMING → EXECUTING → DONE
 - Slot corrections ("actually, make it Tuesday")
 - Turn counting for loop detection
+- Handles new intents: complaint, transfer_to_human
+
+Updated for ML-based NLU (DeBERTa intent + BERT NER slots).
 """
 
 import logging
+import re
 from enum import Enum
 from typing import Any, Optional
 
@@ -16,6 +20,12 @@ from core.nlu.intent import classify_intent
 from core.nlu.slots import extract_slots
 
 logger = logging.getLogger(__name__)
+
+# Phrases that indicate the user is correcting a slot, not changing intent
+CORRECTION_TRIGGERS = re.compile(
+    r'\b(actually|no|change|not|instead|wrong|correct|make it|switch to)\b',
+    re.IGNORECASE
+)
 
 
 class State(str, Enum):
@@ -75,8 +85,15 @@ class DialogueStateTracker:
         # Extract slots from this utterance
         new_slots = extract_slots(text)
 
+        # Detect slot corrections ("actually, make it Tuesday")
+        is_correction = self._is_slot_correction(text, new_slots)
+
         # Determine if this is a new intent or continuation
-        if self._is_new_conversation(new_intent, confidence):
+        if is_correction:
+            # Slot correction — keep current intent, update slots
+            logger.info(f"Slot correction detected: {new_slots}")
+            self.slots.update(new_slots)
+        elif self._is_new_conversation(new_intent, confidence):
             # New intent — reset slots
             self.intent = new_intent
             self.intent_confidence = confidence
@@ -121,19 +138,43 @@ class DialogueStateTracker:
 
     def _is_new_conversation(self, new_intent: str, confidence: float) -> bool:
         """Check if this is a new conversation intent vs continuation."""
-        # First turn or explicit new intent with high confidence
+        # First turn
         if self.intent is None:
             return True
+        # Explicit conversational intents always start fresh
         if new_intent in ("greeting", "goodbye"):
             return True
         # Always allow transition FROM greeting/out_of_domain to real intents
         if self.intent in ("greeting", "out_of_domain") and new_intent not in ("greeting", "out_of_domain"):
             return True
-        if new_intent != self.intent and confidence > 0.3:
+        # Complaint and transfer always override
+        if new_intent in ("complaint", "transfer_to_human"):
+            return True
+        # If currently collecting slots and the ML sees a different intent
+        # but with low confidence, treat it as continuation (user is giving slots)
+        if self.state == State.COLLECTING and new_intent != self.intent:
+            if confidence < 0.4:
+                return False  # Stay on current intent
+        # Different intent with sufficient confidence → new conversation
+        if new_intent != self.intent and confidence > 0.4:
             return True
         # If we're in DONE state, any intent is new
         if self.state == State.DONE:
             return True
+        return False
+
+    def _is_slot_correction(self, text: str, new_slots: dict) -> bool:
+        """Detect if the user is correcting a previously provided slot."""
+        if not self.intent or not new_slots:
+            return False
+        if self.state not in (State.COLLECTING, State.CONFIRMING):
+            return False
+        # Check for correction trigger words
+        if CORRECTION_TRIGGERS.search(text):
+            # Verify the new slots overlap with existing ones (same keys)
+            has_overlap = any(k in self.slots for k in new_slots)
+            if has_overlap:
+                return True
         return False
 
     def _update_state(self) -> None:
@@ -141,6 +182,9 @@ class DialogueStateTracker:
         if self.intent in ("greeting",):
             self.state = State.GREETING
         elif self.intent in ("goodbye",):
+            self.state = State.DONE
+        elif self.intent in ("complaint", "transfer_to_human"):
+            # These escalation-type intents go to DONE (will be routed to Path E)
             self.state = State.DONE
         elif self.intent in ("out_of_domain", "faq"):
             self.state = State.COLLECTING

@@ -104,7 +104,8 @@ def test_route_path_b_missing_slots():
     assert "time" in result.response.lower()
 
 
-def test_route_path_c_low_confidence():
+def test_route_path_b_low_confidence_action():
+    """Action intents with missing slots should always clarify, even at low confidence."""
     from core.router import route, Path
     result = route({
         "intent": "book_appointment", "confidence": 0.2,
@@ -112,9 +113,8 @@ def test_route_path_c_low_confidence():
         "missing_slots": ["date", "time", "name"],
         "turn_count": 1, "failed_turns": 0,
     })
-    assert result.path == Path.C_LLM
-    assert result.needs_llm is True
-    assert result.filler is not None
+    assert result.path == Path.B_CLARIFY
+    assert result.needs_llm is False
 
 
 def test_route_path_c_out_of_domain():

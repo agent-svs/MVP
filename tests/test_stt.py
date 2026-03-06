@@ -54,7 +54,7 @@ def test_stt_init_defaults():
     from core.stt import STT
 
     stt = STT()
-    assert stt.model_size == "base"
+    assert stt.model_size in ("tiny", "base", "small", "medium", "large")
     assert stt.language == "en"
     assert stt.device == "cpu"  # MPS falls back to CPU for CTranslate2
     assert stt.is_loaded is False

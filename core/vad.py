@@ -139,6 +139,34 @@ class VAD:
 
         return None
 
+    def check_barge_in(self, audio_chunk: np.ndarray) -> bool:
+        """
+        Lightweight speech check for barge-in detection during playback.
+
+        Unlike process_chunk(), this doesn't accumulate speech or track
+        utterance boundaries — it just checks if the user is speaking.
+
+        Args:
+            audio_chunk: raw mic audio (any length)
+
+        Returns:
+            True if speech is detected (potential barge-in)
+        """
+        # Need at least 512 samples for Silero
+        if len(audio_chunk) < self._vad_chunk_size:
+            return False
+
+        # Use only the last 512 samples for a quick check
+        chunk = audio_chunk[-self._vad_chunk_size:]
+        tensor = torch.from_numpy(chunk).float()
+        prob = self._model(tensor, self.sample_rate).item()
+        self._last_speech_prob = prob
+
+        if prob >= self.threshold:
+            logger.debug(f"Barge-in detected: speech_prob={prob:.2f}")
+            return True
+        return False
+
     @property
     def is_speaking(self) -> bool:
         """Whether the user is currently speaking."""
@@ -147,7 +175,7 @@ class VAD:
     @property
     def speech_prob(self) -> float:
         """Last computed speech probability."""
-        return 0.0
+        return getattr(self, '_last_speech_prob', 0.0)
 
 
 # ── Standalone test ─────────────────────────────────────────

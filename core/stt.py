@@ -32,6 +32,8 @@ DISFLUENCY_PATTERNS = [
 _DISFLUENCY_RE = [re.compile(p, re.IGNORECASE) for p in DISFLUENCY_PATTERNS]
 # Collapse multiple spaces
 _MULTI_SPACE_RE = re.compile(r"\s{2,}")
+# Pattern to detect transcriptions that are just noise (dots, punctuation, no words)
+_NOISE_RE = re.compile(r'^[^a-zA-Z]*$')
 
 
 def clean_disfluencies(text: str) -> str:
@@ -147,6 +149,11 @@ class STT:
             text = cleaned
         else:
             text = raw_text
+
+        # Filter out noise transcriptions (just dots, punctuation, no real words)
+        if text and _NOISE_RE.match(text):
+            logger.info(f"STT ({elapsed:.2f}s): filtered noise \"{text}\"")
+            return "", elapsed
 
         logger.info(
             f"STT ({elapsed:.2f}s): \"{text}\" "

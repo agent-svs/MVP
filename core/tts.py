@@ -176,6 +176,71 @@ class TTS:
 
         return audio, self._sample_rate, elapsed
 
+    def synthesize_stream(
+        self,
+        text: str,
+        language: Optional[str] = None,
+        use_cache: bool = True,
+    ):
+        """
+        Stream TTS sentence-by-sentence.
+
+        Splits text into sentences and yields each one as it's synthesized.
+        The caller can start playing the first sentence while remaining
+        sentences are still being synthesized.
+
+        Args:
+            text: Full text to synthesize
+            language: Override language
+            use_cache: Whether to use/save per-sentence cache
+
+        Yields:
+            Tuple of (audio_array, sample_rate) for each sentence
+        """
+        if not text or not text.strip():
+            return
+
+        sentences = self._split_into_sentences(text)
+        if not sentences:
+            return
+
+        # If only one sentence, just synthesize directly
+        if len(sentences) == 1:
+            audio, sr, _ = self.synthesize(sentences[0], language, use_cache)
+            if len(audio) > 0:
+                yield audio, sr
+            return
+
+        # Synthesize and yield each sentence
+        for i, sentence in enumerate(sentences):
+            audio, sr, elapsed = self.synthesize(sentence, language, use_cache)
+            if len(audio) > 0:
+                logger.debug(
+                    f"Stream chunk {i+1}/{len(sentences)}: "
+                    f"\"{sentence[:40]}\" ({elapsed:.2f}s)"
+                )
+                yield audio, sr
+
+    @staticmethod
+    def _split_into_sentences(text: str) -> list[str]:
+        """Split text into sentences for streaming synthesis."""
+        import re
+        # Split on sentence-ending punctuation followed by space or end
+        parts = re.split(r'(?<=[.!?])\s+', text.strip())
+        # Also split very long sentences on commas (XTTS limit ~250 chars)
+        result = []
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            if len(part) > 200:
+                # Split on commas for very long sentences
+                sub_parts = re.split(r',\s+', part)
+                result.extend(sp.strip() for sp in sub_parts if sp.strip())
+            else:
+                result.append(part)
+        return result
+
     @property
     def sample_rate(self) -> int:
         return self._sample_rate

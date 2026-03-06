@@ -115,6 +115,23 @@ def route(nlu_result: dict) -> RoutingResult:
             response=get_goodbye(),
         )
 
+    # ── Complaint / Transfer → Escalation ───────────────────
+    if intent == "complaint":
+        logger.info("Route → Path E (complaint → escalate)")
+        return RoutingResult(
+            path=Path.E_ESCALATE,
+            response="I'm sorry you're having a bad experience. Let me connect you with a manager who can help resolve this.",
+            metadata={"reason": "complaint"},
+        )
+
+    if intent == "transfer_to_human":
+        logger.info("Route → Path E (transfer → human)")
+        return RoutingResult(
+            path=Path.E_ESCALATE,
+            response=get_escalation(),
+            metadata={"reason": "user_requested_transfer"},
+        )
+
     # ── Out of domain → LLM ────────────────────────────────
     if intent == "out_of_domain":
         logger.info(f"Route → Path C (out of domain)")
@@ -138,24 +155,26 @@ def route(nlu_result: dict) -> RoutingResult:
         )
 
     # ── Action intents (book, cancel, reschedule, status) ───
-    if level == "high" and not missing:
-        # Path A: All slots filled, high confidence → direct action
-        logger.info(f"Route → Path A (direct): {intent} with {slots}")
-        return RoutingResult(
-            path=Path.A_DIRECT,
-            response=get_action_response(intent, slots),
-            metadata={"action": intent, "slots": slots},
-        )
+    ACTION_INTENTS = {"book_appointment", "cancel_appointment", "reschedule", "check_status"}
 
-    if level in ("high", "medium") and missing:
-        # Path B: Missing slots → clarify
-        next_slot = missing[0]
-        logger.info(f"Route → Path B (clarify): asking for '{next_slot}'")
-        return RoutingResult(
-            path=Path.B_CLARIFY,
-            response=get_slot_prompt(next_slot),
-            metadata={"missing_slot": next_slot, "all_missing": missing},
-        )
+    if intent in ACTION_INTENTS:
+        if not missing:
+            # All slots filled → direct action
+            logger.info(f"Route → Path A (direct): {intent} with {slots}")
+            return RoutingResult(
+                path=Path.A_DIRECT,
+                response=get_action_response(intent, slots),
+                metadata={"action": intent, "slots": slots},
+            )
+        else:
+            # Missing slots → ALWAYS clarify (don't fall to LLM)
+            next_slot = missing[0]
+            logger.info(f"Route → Path B (clarify): asking for '{next_slot}'")
+            return RoutingResult(
+                path=Path.B_CLARIFY,
+                response=get_slot_prompt(next_slot),
+                metadata={"missing_slot": next_slot, "all_missing": missing},
+            )
 
     # ── Low confidence → LLM fallback ──────────────────────
     logger.info(f"Route → Path C (LLM fallback): conf={overall_conf:.2f}")

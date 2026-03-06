@@ -28,3 +28,7 @@ assets/cache/
 # OS
 .DS_Store
 Thumbs.db
+
+# Misc files
+download.png
+random.txt

@@ -1,12 +1,14 @@
 """
-Voice Pipeline — Full Orchestration Loop
+Voice Pipeline — Full Orchestration Loop (v2)
 
 Wires all layers together:
-  Mic → VAD → STT → NLU → Router → [LLM] → Guardrails → TTS → Speaker
+  Mic → Preprocessor → VAD → STT → NLU → Router → [LLM] → Guardrails → TTS → Speaker
 
 Features:
+- Audio preprocessing (noise suppression, HPF, AGC)
 - Filler injection for LLM latency masking
-- Barge-in support (interrupt TTS playback)
+- Barge-in support — monitors mic during TTS playback
+- Streaming TTS — plays sentence-by-sentence
 - Graceful error handling per turn
 """
 
@@ -18,6 +20,7 @@ from typing import Optional
 from config import cfg
 from core.audio_input import AudioInput
 from core.audio_output import AudioOutput
+from core.audio_preprocessor import AudioPreprocessor
 from core.vad import VAD
 from core.stt import STT
 from core.tts import TTS
@@ -32,14 +35,17 @@ logger = logging.getLogger(__name__)
 
 class VoicePipeline:
     """
-    Full voice conversation pipeline.
+    Full voice conversation pipeline (v2).
 
-    Orchestrates: Audio → VAD → STT → NLU → Router → [LLM] → Guard → TTS → Speaker
+    Orchestrates: Audio → Preprocess → VAD → STT → NLU → Router
+                  → [LLM] → Guard → Streaming TTS → Speaker
+    With barge-in monitoring during TTS playback.
     """
 
     def __init__(self):
         self.audio_in = AudioInput()
         self.audio_out = AudioOutput()
+        self.preprocessor = AudioPreprocessor()
         self.vad = VAD()
         self.stt = STT()
         self.tts = TTS()
@@ -48,6 +54,8 @@ class VoicePipeline:
 
         self._running = False
         self._turn_count = 0
+        self._is_speaking_response = False  # True while TTS is playing
+        self._barge_in_detected = False
 
     def load_models(self) -> None:
         """Pre-load all ML models at startup."""
@@ -57,6 +65,12 @@ class VoicePipeline:
         self.stt.load()
         self.tts.load()
         # LLM is lazy-loaded on first call
+
+        # Pre-load NLU models (DeBERTa intent + BERT NER)
+        from core.nlu.intent import _load_model as load_intent_model
+        from core.nlu.slots import _load_ner as load_ner_model
+        load_intent_model()
+        load_ner_model()
 
         elapsed = time.time() - t0
         logger.info(f"All models loaded in {elapsed:.1f}s")
@@ -85,12 +99,14 @@ class VoicePipeline:
 
     def _process_one_turn(self) -> None:
         """Process a single conversation turn."""
-        # 1. Listen for speech via VAD
+        # 1. Listen for speech via VAD (with preprocessing)
         chunk = self.audio_in.read_chunk(timeout=0.1)
         if chunk is None:
             return
 
-        utterance = self.vad.process_chunk(chunk)
+        # Preprocess audio before VAD
+        clean_chunk = self.preprocessor.process(chunk)
+        utterance = self.vad.process_chunk(clean_chunk)
         if utterance is None:
             return  # No complete utterance yet
 
@@ -134,18 +150,71 @@ class VoicePipeline:
 
         final_response = guard_result.text
 
-        # 7. Speak response
+        # 7. Speak response (with barge-in monitoring)
         total_elapsed = time.time() - t0
         print(f"  🔊 AI: \"{final_response}\" (total: {total_elapsed:.2f}s)")
-        self._speak(final_response)
+        self._speak_with_barge_in(final_response)
 
     def _speak(self, text: str) -> None:
-        """Synthesize and play speech (blocking)."""
+        """Synthesize and play speech (blocking, no barge-in)."""
         if not text:
             return
         audio, sr, _ = self.tts.synthesize(text)
         if len(audio) > 0:
             self.audio_out.play(audio, sample_rate=sr)
+
+    def _speak_with_barge_in(self, text: str) -> None:
+        """
+        Speak with barge-in monitoring using streaming TTS.
+
+        Synthesizes text sentence-by-sentence and plays each chunk,
+        checking for barge-in between sentences. If the user starts
+        speaking, stops playback immediately.
+        """
+        if not text:
+            return
+
+        self._is_speaking_response = True
+        self._barge_in_detected = False
+
+        try:
+            for audio, sr in self.tts.synthesize_stream(text):
+                if self._barge_in_detected:
+                    logger.info("Barge-in: stopping remaining sentences")
+                    print("  🛑 Barge-in detected — stopping")
+                    break
+
+                # Start barge-in monitor thread during playback
+                monitor = threading.Thread(
+                    target=self._barge_in_monitor, daemon=True
+                )
+                monitor.start()
+
+                # Play this sentence chunk
+                self.audio_out.play(audio, sample_rate=sr)
+
+                # Check if barge-in was detected during playback
+                if self._barge_in_detected:
+                    self.audio_out.interrupt()
+                    break
+
+        finally:
+            self._is_speaking_response = False
+
+    def _barge_in_monitor(self) -> None:
+        """Monitor mic for speech during TTS playback."""
+        while self._is_speaking_response and self.audio_out.is_playing:
+            chunk = self.audio_in.read_chunk(timeout=0.05)
+            if chunk is None:
+                continue
+
+            # Preprocess before VAD check
+            clean = self.preprocessor.process(chunk)
+            if self.vad.check_barge_in(clean):
+                self._barge_in_detected = True
+                self.audio_out.interrupt()
+                logger.info("Barge-in: user started speaking during response")
+                return
 
     def _speak_async(self, text: str) -> None:
         """Synthesize and play speech in background thread."""

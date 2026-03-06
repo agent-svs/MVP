@@ -104,8 +104,8 @@ class VADConfig:
 @dataclass
 class NLUConfig:
     """NLU routing thresholds."""
-    confidence_high: float = 0.85
-    confidence_low: float = 0.60
+    confidence_high: float = 0.80
+    confidence_low: float = 0.50
 
 
 @dataclass

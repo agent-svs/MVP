@@ -1,39 +1,39 @@
 # ============================================================
 # AI Voice Receptionist — Stable Production Dependencies
-# Python 3.11 (Apple Silicon Compatible)
+# Python 3.14 (Apple Silicon Compatible)
 # ============================================================
 
 # Core
-python-dotenv==1.0.1
-fastapi==0.128.8
-uvicorn==0.30.6
+python-dotenv==1.2.2
+fastapi>=0.128.0
+uvicorn>=0.30.0
 
 # Audio
-sounddevice==0.4.6
-numpy==1.26.4
-scipy==1.13.1
+sounddevice==0.5.5
+numpy==2.4.2
+scipy==1.17.1
+noisereduce==3.0.3
 
 # VAD
-silero-vad==5.1.2
+silero-vad==6.2.1
 
 # PyTorch
-torch==2.5.1
-torchaudio==2.5.1
+torch==2.10.0
+torchaudio==2.10.0
 
 # STT
-faster-whisper==1.0.3
+faster-whisper==1.2.1
 
 # TTS
-coqui-tts==0.27.5
-transformers==4.57.6          # pinned: coqui-tts needs >=4.57 but 5.x breaks it
+coqui-tts>=0.27.0
+transformers==5.0.0
 
 # LLM
-google-genai==0.5.0
+google-genai==1.65.0
 
-# NLU
-spacy==3.7.4
+# NLU (DeBERTa intent + BERT NER via transformers, already listed above)
 python-dateutil==2.9.0.post0
 
 # Testing
-pytest==8.2.2
-pytest-asyncio==0.23.6
+pytest==9.0.2
+pytest-asyncio>=0.23.0

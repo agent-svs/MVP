@@ -11,6 +11,10 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# MPS (Apple Silicon GPU) doesn't support conv1d with >65536 output channels.
+# Must be set BEFORE torch is ever imported anywhere in the project.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 from dotenv import load_dotenv
 
 # Load .env from project root

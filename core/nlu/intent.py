@@ -31,12 +31,13 @@ INTENTS = {
     },
     "book_appointment": {
         "keywords": ["book", "schedule", "appointment", "reserve", "make an appointment",
-                     "set up", "arrange", "slot", "visit", "book a time"],
+                     "set up", "arrange", "slot", "visit", "book a time", "looking for"],
         "patterns": [
             r"\b(book|schedule|make|set\s+up|arrange)\b.*\b(appointment|meeting|visit|slot|time)\b",
             r"\b(appointment|meeting|visit)\b.*\b(book|schedule|for)\b",
             r"\bwant\s+to\s+(book|schedule|come\s+in)\b",
             r"\b(can|could)\s+i\s+(book|schedule|get)\b",
+            r"\b(looking\s+for|need|want)\b.*\b(appointment|visit|booking)\b",
         ],
         "weight": 1.0,
     },

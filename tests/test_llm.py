@@ -143,10 +143,11 @@ def test_llm_builds_contents():
     llm._history.append({"role": "user", "parts": [{"text": "Hi"}]})
     llm._history.append({"role": "model", "parts": [{"text": "Hello!"}]})
 
-    contents = llm._build_contents("Book an appointment")
+    contents, dynamic_prompt = llm._build_contents("Book an appointment")
     assert len(contents) == 3  # 2 history + 1 new
     assert contents[0]["role"] == "user"
     assert contents[2]["parts"][0]["text"] == "Book an appointment"
+    assert "CURRENT CONVERSATION CONTEXT" not in dynamic_prompt
 
 
 def test_llm_system_prompt_default():

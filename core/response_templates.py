@@ -98,6 +98,20 @@ ESCALATION = [
     "It seems like this needs a human touch. Let me connect you with someone who can help.",
 ]
 
+# ── Help ────────────────────────────────────────────────────
+
+HELP_RESPONSES = [
+    "I can help you book, cancel, or reschedule appointments. I can also check the status of an existing appointment. What would you like to do?",
+    "Here's what I can do: book a new appointment, cancel an existing one, reschedule, or check your appointment status. How can I help?",
+]
+
+# ── Repeat ──────────────────────────────────────────────────
+
+REPEAT_RESPONSES = [
+    "Sure, let me say that again.",
+    "Of course. Let me repeat that for you.",
+]
+
 
 # ── Template Functions ──────────────────────────────────────
 
@@ -115,6 +129,12 @@ def get_out_of_domain() -> str:
 
 def get_escalation() -> str:
     return random.choice(ESCALATION)
+
+def get_help() -> str:
+    return random.choice(HELP_RESPONSES)
+
+def get_repeat() -> str:
+    return random.choice(REPEAT_RESPONSES)
 
 def get_booking_confirmed(slots: dict) -> str:
     template = random.choice(BOOKING_CONFIRMED)

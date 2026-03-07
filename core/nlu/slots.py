@@ -1,12 +1,14 @@
 """
-Slot Extractor — BERT NER + DateUtil + Custom Patterns (v2)
+Slot Extractor — BERT NER + DateUtil + Custom Patterns (v3)
 
 Extracts structured entity slots from user utterances:
 - PERSON → name (via dslim/bert-base-NER)
-- DATE → date (via python-dateutil fuzzy parsing)
-- TIME → time (via python-dateutil + regex patterns)
+- DOCTOR → doctor_name (Dr./Doctor prefix + NER)
+- DATE → date (via python-dateutil fuzzy parsing, validated not-past)
+- TIME → time (via python-dateutil + regex, validated business hours)
 - PHONE → phone (regex pattern)
-- SERVICE → service_type (keyword matching)
+- SERVICE → service_type (keyword matching, expanded list)
+- REASON → reason (appointment purpose extraction)
 
 SpaCy was incompatible with Python 3.14, so we use HuggingFace
 transformers NER instead. Future migration to fine-tuned BERT NER
@@ -22,7 +24,12 @@ from typing import Any, Optional
 from dateutil import parser as dateutil_parser
 from dateutil.relativedelta import relativedelta
 
+from config import cfg
+
 logger = logging.getLogger(__name__)
+
+# Import entity resolver
+from core.nlu.entities import entity_store
 
 # ── BERT NER Model (lazy-loaded) ───────────────────────────
 _ner_pipeline = None
@@ -81,17 +88,111 @@ _PHONE_RE = re.compile(
     r'\d{3}[-.\s]?\d{4}\b'
 )
 
-# Service types (receptionist domain)
+# Doctor name prefix pattern
+_DOCTOR_PREFIX_RE = re.compile(
+    r'\b(?:dr\.?|doctor)\s+',
+    re.IGNORECASE
+)
+
+# Service types (receptionist domain) — expanded v3
 _SERVICES = [
-    "dental checkup", "dental cleaning", "teeth cleaning",
+    # Dental
+    "dental checkup", "dental cleaning", "teeth cleaning", "teeth whitening",
+    "root canal", "dental filling", "dental crown",
+    # Medical
     "consultation", "checkup", "check-up", "check up",
-    "physical exam", "physical", "exam",
-    "eye exam", "vision test",
-    "haircut", "trim", "coloring",
-    "massage", "facial", "spa",
-    "oil change", "tune-up", "repair",
-    "general", "follow-up", "follow up",
+    "physical exam", "physical", "exam", "annual physical",
+    "eye exam", "vision test", "eye test",
+    "blood test", "blood work", "lab work",
+    "x-ray", "xray", "scan", "mri", "ct scan",
+    "vaccination", "vaccine", "flu shot", "immunization",
+    # Wellness / Beauty
+    "haircut", "trim", "coloring", "hair color", "highlights",
+    "massage", "facial", "spa", "manicure", "pedicure",
+    # Auto
+    "oil change", "tune-up", "repair", "brake check", "tire rotation",
+    # General
+    "general", "follow-up", "follow up", "followup",
+    "initial visit", "new patient", "routine",
 ]
+
+# Reason keywords — to capture appointment purpose
+_REASON_PATTERNS = re.compile(
+    r'\b(?:for|about|regarding|because of|due to)\s+'
+    r'(?:my|a|an|the)?\s*'
+    r'(\w[\w\s]{2,30}?)'
+    r'(?:\.|,|$|\b(?:on|at|tomorrow|next|this))',
+    re.IGNORECASE
+)
+
+# Business hours for validation (8 AM to 8 PM)
+_BUSINESS_HOUR_START = 8
+_BUSINESS_HOUR_END = 20
+
+
+def _extract_doctor_name(text: str) -> Optional[tuple[str, float]]:
+    """Extract doctor name from text (Dr./Doctor + name)."""
+    match = _DOCTOR_PREFIX_RE.search(text)
+    if not match:
+        return None
+
+    after_prefix = text[match.end():].strip()
+    if not after_prefix:
+        return None
+
+    _load_ner()
+    try:
+        entities = _ner_pipeline(after_prefix)
+    except Exception:
+        words = after_prefix.split()
+        name_parts = []
+        for w in words[:3]:
+            if w[0].isupper() or len(name_parts) > 0:
+                clean = re.sub(r'[^\w]', '', w)
+                if clean and clean[0].isupper():
+                    name_parts.append(clean)
+                else:
+                    break
+            else:
+                break
+        return (" ".join(name_parts), 0.6) if name_parts else None
+
+    person_parts = []
+    avg_score = 0.0
+    for ent in entities:
+        if ent["entity_group"] == "PER" and float(ent["score"]) > 0.5:
+            person_parts.append(ent["word"].strip())
+            avg_score += float(ent["score"])
+
+    if person_parts:
+        name = " ".join(person_parts)
+        name = name.replace(" ##", "").replace("##", "")
+        name = re.sub(r'\s+', ' ', name).strip()
+        if len(name) >= 2:
+            return (name, avg_score / len(person_parts))
+
+    words = after_prefix.split()
+    name_parts = []
+    for w in words[:3]:
+        clean = re.sub(r'[^\w]', '', w)
+        if clean and clean[0].isupper():
+            name_parts.append(clean)
+        else:
+            break
+    return (" ".join(name_parts), 0.5) if name_parts else None
+
+
+def _extract_reason(text: str) -> Optional[tuple[str, float]]:
+    """Extract appointment reason/purpose from text."""
+    match = _REASON_PATTERNS.search(text)
+    if match:
+        reason = match.group(1).strip()
+        if len(reason) >= 3 and reason.lower() not in (
+            "it", "that", "this", "me", "you", "him", "her",
+            "appointment", "booking", "visit",
+        ):
+            return (reason, 0.8)
+    return None
 
 
 def extract_slots(text: str) -> dict[str, Any]:
@@ -105,7 +206,8 @@ def extract_slots(text: str) -> dict[str, Any]:
         text: User utterance
 
     Returns:
-        Dict of extracted slots: {name, date, time, phone, service_type}
+        Dict of extracted slots with confidence: 
+        {slot_key: {"value": x, "confidence": y}}
     """
     if not text or not text.strip():
         return {}
@@ -113,30 +215,46 @@ def extract_slots(text: str) -> dict[str, Any]:
     t0 = time.time()
     slots: dict[str, Any] = {}
 
-    # 1. Extract person name via BERT NER
-    name = _extract_name_ner(text)
-    if name:
-        slots["name"] = name
+    # Helper to clean up the code below
+    def add_slot(key: str, result: Optional[tuple[str, float]]):
+        if result:
+            val, conf = result
+            slot_data = {"value": val, "confidence": conf}
+            
+            # Attempt canonical resolution
+            canonical = entity_store.resolve_entity(key, val)
+            if canonical:
+                slot_data["canonical_id"] = canonical["id"]
+                slot_data["canonical_name"] = canonical["canonical_name"]
+                
+            slots[key] = slot_data
 
-    # 2. Extract date
-    date = _extract_date(text)
-    if date:
-        slots["date"] = date
+    # 1. Extract doctor name
+    doc_res = _extract_doctor_name(text)
+    add_slot("doctor_name", doc_res)
 
-    # 3. Extract time
-    extracted_time = _extract_time(text)
-    if extracted_time:
-        slots["time"] = extracted_time
+    # 2. Extract person name
+    name_res = _extract_name_ner(text)
+    if name_res:
+        name_val, name_conf = name_res
+        doctor_val = doc_res[0] if doc_res else None
+        if not doctor_val or name_val.lower() != doctor_val.lower():
+            add_slot("name", name_res)
 
-    # 4. Extract phone number
-    phone = _extract_phone(text)
-    if phone:
-        slots["phone"] = phone
+    # 3. Extract date
+    add_slot("date", _extract_date(text))
 
-    # 5. Extract service type
-    service = _extract_service(text)
-    if service:
-        slots["service_type"] = service
+    # 4. Extract time
+    add_slot("time", _extract_time(text))
+
+    # 5. Extract phone number
+    add_slot("phone", _extract_phone(text))
+
+    # 6. Extract service type
+    add_slot("service_type", _extract_service(text))
+
+    # 7. Extract reason/purpose
+    add_slot("reason", _extract_reason(text))
 
     elapsed = time.time() - t0
     if slots:
@@ -145,9 +263,7 @@ def extract_slots(text: str) -> dict[str, Any]:
         logger.debug(f"No slots found ({elapsed:.3f}s)")
 
     return slots
-
-
-def _extract_name_ner(text: str) -> Optional[str]:
+def _extract_name_ner(text: str) -> Optional[tuple[str, float]]:
     """Extract person name using BERT NER."""
     _load_ner()
 
@@ -159,9 +275,11 @@ def _extract_name_ner(text: str) -> Optional[str]:
 
     # Collect PER entities
     person_parts = []
+    avg_score = 0.0
     for ent in entities:
-        if ent["entity_group"] == "PER" and ent["score"] > 0.6:
+        if ent["entity_group"] == "PER" and float(ent["score"]) > 0.6:
             person_parts.append(ent["word"].strip())
+            avg_score += float(ent["score"])
 
     if not person_parts:
         return None
@@ -181,10 +299,10 @@ def _extract_name_ner(text: str) -> Optional[str]:
     if len(name) < 2:
         return None
 
-    return name
+    return (name, avg_score / len(person_parts))
 
 
-def _extract_date(text: str) -> Optional[str]:
+def _extract_date(text: str) -> Optional[tuple[str, float]]:
     """Extract and normalize date from text to YYYY-MM-DD."""
     text_lower = text.lower()
     today = datetime.now().date()
@@ -193,36 +311,37 @@ def _extract_date(text: str) -> Optional[str]:
     for keyword, days_offset in _RELATIVE_DATES.items():
         if keyword in text_lower:
             target = today + timedelta(days=days_offset)
-            return target.isoformat()
+            return (target.isoformat(), 0.95)
 
     # Check day names (e.g., "next Monday", "this Friday")
     for day_name, weekday in _DAY_NAMES.items():
         if day_name in text_lower:
-            # Calculate next occurrence of this weekday
             days_ahead = weekday - today.weekday()
             if days_ahead <= 0:
-                days_ahead += 7  # Next week
-            # Check if "next" is specified — add another week
+                days_ahead += 7
             if f"next {day_name}" in text_lower:
                 days_ahead += 7
             target = today + timedelta(days=days_ahead)
-            return target.isoformat()
+            return (target.isoformat(), 0.9)
 
     # Try dateutil fuzzy parsing
     try:
         parsed = dateutil_parser.parse(text, fuzzy=True, default=datetime.now())
-        # Only return if the parsed date is different from "now" (meaning it found something)
         if parsed.date() != today or any(
             kw in text_lower for kw in ["today", "tonight", "this evening"]
         ):
-            return parsed.date().isoformat()
+            parsed_date = parsed.date()
+            if parsed_date < today:
+                logger.info(f"Date '{parsed_date.isoformat()}' is in the past — skipping")
+                return None
+            return (parsed_date.isoformat(), 0.8)
     except (ValueError, OverflowError):
         pass
 
     return None
 
 
-def _extract_time(text: str) -> Optional[str]:
+def _extract_time(text: str) -> Optional[tuple[str, float]]:
     """Extract and normalize time from text to HH:MM format."""
     # Try 12-hour format first (3 PM, 3:30 pm)
     match = _TIME_12H_RE.search(text)
@@ -236,7 +355,7 @@ def _extract_time(text: str) -> Optional[str]:
         elif ampm == "am" and hour == 12:
             hour = 0
 
-        return f"{hour:02d}:{minute:02d}"
+        return (f"{hour:02d}:{minute:02d}", 0.95)
 
     # Try 24-hour format (15:00)
     match = _TIME_24H_RE.search(text)
@@ -244,16 +363,15 @@ def _extract_time(text: str) -> Optional[str]:
         hour = int(match.group(1))
         minute = int(match.group(2))
         if 0 <= hour < 24 and 0 <= minute < 60:
-            return f"{hour:02d}:{minute:02d}"
+            return (f"{hour:02d}:{minute:02d}", 0.9)
 
     # Try "X o'clock"
     match = _TIME_OCLOCK_RE.search(text)
     if match:
         hour = int(match.group(1))
-        # Assume PM for business hours (9-12 could be AM)
         if 1 <= hour <= 7:
             hour += 12
-        return f"{hour:02d}:00"
+        return (f"{hour:02d}:00", 0.85)
 
     # Try natural language time
     text_lower = text.lower()
@@ -263,28 +381,27 @@ def _extract_time(text: str) -> Optional[str]:
     }
     for keyword, time_val in time_keywords.items():
         if keyword in text_lower:
-            return time_val
+            return (time_val, 0.8)
 
     return None
 
 
-def _extract_phone(text: str) -> Optional[str]:
+def _extract_phone(text: str) -> Optional[tuple[str, float]]:
     """Extract phone number from text."""
     match = _PHONE_RE.search(text)
     if match:
-        # Normalize: keep only digits
         digits = re.sub(r'\D', '', match.group())
         if len(digits) >= 10:
-            return digits[-10:]  # Last 10 digits
+            return (digits[-10:], 0.95)
     return None
 
 
-def _extract_service(text: str) -> Optional[str]:
+def _extract_service(text: str) -> Optional[tuple[str, float]]:
     """Extract service type from text."""
     text_lower = text.lower()
-    for service in _SERVICES:
+    for service in sorted(_SERVICES, key=len, reverse=True):
         if service in text_lower:
-            return service
+            return (service, 0.85)
     return None
 
 

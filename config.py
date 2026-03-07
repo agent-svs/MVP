@@ -15,21 +15,26 @@ from pathlib import Path
 # Must be set BEFORE torch is ever imported anywhere in the project.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-from dotenv import load_dotenv
-
 # Load .env from project root
 _PROJECT_ROOT = Path(__file__).parent
-load_dotenv(_PROJECT_ROOT / ".env")
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(_PROJECT_ROOT / ".env")
+except ImportError:
+    pass
 
 def _detect_device() -> str:
     """Auto-detect the best available compute device."""
-    import torch
-
-    if torch.cuda.is_available():
-        return "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return "mps"
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+    except ImportError:
+        pass
+        
     return "cpu"
 
 
@@ -175,8 +180,8 @@ class Config:
 
         # NLU
         nlu = NLUConfig(
-            confidence_high=_get_env_float("NLU_CONFIDENCE_HIGH", 0.85),
-            confidence_low=_get_env_float("NLU_CONFIDENCE_LOW", 0.60),
+            confidence_high=_get_env_float("NLU_CONFIDENCE_HIGH", 0.80),
+            confidence_low=_get_env_float("NLU_CONFIDENCE_LOW", 0.50),
         )
 
         return cls(

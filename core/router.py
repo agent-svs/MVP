@@ -24,7 +24,9 @@ from core.response_templates import (
     get_filler,
     get_greeting,
     get_goodbye,
+    get_help,
     get_out_of_domain,
+    get_repeat,
     get_slot_prompt,
 )
 
@@ -153,6 +155,84 @@ def route(nlu_result: dict) -> RoutingResult:
             filler=get_filler(),
             metadata={"reason": "faq"},
         )
+
+    # ── v3: Conversational intents ──────────────────────────
+
+    # Confirmation — user said "yes" / "that's right"
+    # Re-route based on active intent state
+    if intent == "confirmation":
+        active_intent = nlu_result.get("_active_intent", intent)
+        if not missing and state == "confirming":
+            logger.info(f"Route → Path A (confirmed): {active_intent}")
+            return RoutingResult(
+                path=Path.A_DIRECT,
+                response=get_action_response(active_intent, slots),
+                metadata={"action": active_intent, "slots": slots, "confirmed": True},
+            )
+        elif missing:
+            next_slot = missing[0]
+            logger.info(f"Route → Path B (confirmation but still missing '{next_slot}')")
+            return RoutingResult(
+                path=Path.B_CLARIFY,
+                response=get_slot_prompt(next_slot),
+                metadata={"missing_slot": next_slot, "all_missing": missing},
+            )
+
+    # Denial — user said "no" / "that's wrong"
+    # Re-prompt the last asked slot or ask what to change
+    if intent == "denial":
+        if missing:
+            next_slot = missing[0]
+            logger.info(f"Route → Path B (denial, re-asking '{next_slot}')")
+            return RoutingResult(
+                path=Path.B_CLARIFY,
+                response=f"No problem. {get_slot_prompt(next_slot)}",
+                metadata={"missing_slot": next_slot, "all_missing": missing},
+            )
+        else:
+            # All slots filled but user denied — ask what to change
+            logger.info("Route → Path B (denial, asking what to change)")
+            return RoutingResult(
+                path=Path.B_CLARIFY,
+                response="I understand. What would you like to change?",
+                metadata={"reason": "denial_correction"},
+            )
+
+    # Help — user asking what services/options are available
+    if intent == "help":
+        logger.info("Route → Path A (help)")
+        return RoutingResult(
+            path=Path.A_DIRECT,
+            response=get_help(),
+        )
+
+    # Repeat — user asking to say something again
+    if intent == "repeat":
+        logger.info("Route → Path A (repeat)")
+        return RoutingResult(
+            path=Path.A_DIRECT,
+            response=get_repeat(),
+        )
+
+    # Information provision — user just answering with data
+    # Treat same as active intent with whatever slots are now filled
+    if intent == "information_provision":
+        active_intent = nlu_result.get("_active_intent", "book_appointment")
+        if not missing:
+            logger.info(f"Route → Path A (info provided, all filled): {active_intent}")
+            return RoutingResult(
+                path=Path.A_DIRECT,
+                response=get_action_response(active_intent, slots),
+                metadata={"action": active_intent, "slots": slots},
+            )
+        else:
+            next_slot = missing[0]
+            logger.info(f"Route → Path B (info provided, still need '{next_slot}')")
+            return RoutingResult(
+                path=Path.B_CLARIFY,
+                response=get_slot_prompt(next_slot),
+                metadata={"missing_slot": next_slot, "all_missing": missing},
+            )
 
     # ── Action intents (book, cancel, reschedule, status) ───
     ACTION_INTENTS = {"book_appointment", "cancel_appointment", "reschedule", "check_status"}

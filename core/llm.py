@@ -137,8 +137,8 @@ class LLM:
         self._client = genai.Client(api_key=self.api_key)
         logger.info(f"Gemini client initialized (model={self.model_name})")
 
-    def _build_contents(self, user_message: str) -> list[dict]:
-        """Build the message list including history and system prompt."""
+    def _build_contents(self, user_message: str, context: Optional[dict] = None) -> tuple[list[dict], str]:
+        """Build the message list including history and dynamically updated system prompt."""
         contents = []
 
         # Add conversation history
@@ -147,14 +147,22 @@ class LLM:
 
         # Add current user message
         contents.append({"role": "user", "parts": [{"text": user_message}]})
+        
+        # Build dynamic system prompt with context
+        dynamic_prompt = self.system_prompt
+        if context:
+            import json
+            context_str = json.dumps(context, indent=2)
+            dynamic_prompt += f"\n\nCURRENT CONVERSATION CONTEXT (Slots filled so far):\n{context_str}\n\nUse this context to inform your response. If a slot is filled, do not ask for it again."
 
-        return contents
+        return contents, dynamic_prompt
 
     def generate(
         self,
         message: str,
         system_prompt: Optional[str] = None,
         shape: bool = True,
+        context: Optional[dict] = None,
     ) -> tuple[str, float]:
         """
         Generate a response from Gemini.
@@ -163,6 +171,7 @@ class LLM:
             message: User message text
             system_prompt: Override system prompt for this call
             shape: Whether to apply speech shaping
+            context: Optional dictionary of conversation state (e.g. active slots)
 
         Returns:
             Tuple of (response_text, elapsed_seconds)
@@ -171,8 +180,8 @@ class LLM:
 
         from google.genai import types
 
-        sys_prompt = system_prompt or self.system_prompt
-        contents = self._build_contents(message)
+        contents, dynamic_prompt = self._build_contents(message, context)
+        sys_prompt = system_prompt or dynamic_prompt
 
         t0 = time.time()
 
@@ -222,6 +231,7 @@ class LLM:
         self,
         message: str,
         system_prompt: Optional[str] = None,
+        context: Optional[dict] = None,
     ) -> AsyncIterator[str]:
         """
         Stream response tokens from Gemini.
@@ -232,8 +242,8 @@ class LLM:
 
         from google.genai import types
 
-        sys_prompt = system_prompt or self.system_prompt
-        contents = self._build_contents(message)
+        contents, dynamic_prompt = self._build_contents(message, context)
+        sys_prompt = system_prompt or dynamic_prompt
 
         response = self._client.models.generate_content_stream(
             model=self.model_name,

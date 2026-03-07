@@ -28,7 +28,8 @@ from core.llm import LLM
 from core.nlu.dst import DialogueStateTracker
 from core.router import route, Path
 from core.guardrails import apply_guardrails
-from core.response_templates import get_filler
+from core.response_templates import get_filler, get_greeting, get_goodbye
+from core.nlu.logger import nlu_logger
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,13 @@ class VoicePipeline:
         routing = route(nlu_result)
         print(f"  🔀 Path {routing.path.value}: {intent}")
 
+        # 4b. Log the NLU turn result
+        turn_data = {
+            **nlu_result,
+            "route": routing.path.value,
+        }
+        nlu_logger.log_turn(turn_data)
+
         # 5. Generate response
         if routing.needs_llm:
             # Play filler while LLM processes
@@ -136,11 +144,18 @@ class VoicePipeline:
                 print(f"  💬 Filler: \"{routing.filler}\"")
                 self._speak_async(routing.filler)
 
-            # Call LLM
-            response, llm_elapsed = self.llm.generate(text)
+            # Call LLM with current slot context
+            response, llm_elapsed = self.llm.generate(text, context=slots)
             print(f"  🤖 LLM ({llm_elapsed:.2f}s): \"{response[:80]}\"")
         else:
             response = routing.response
+
+        # 5b. Set expectation for clarify responses
+        # When the AI asks "What date?", tell the DST to expect a date next turn
+        if routing.path.value == "clarify" and routing.metadata:
+            next_slot = routing.metadata.get("missing_slot")
+            if next_slot:
+                self.dst.set_expectation(next_slot, response)
 
         # 6. Apply guardrails
         guard_result = apply_guardrails(response, slots)

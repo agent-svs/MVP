@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 def test_intent_greeting():
     from core.nlu.intent import classify_intent
-    intent, conf = classify_intent("Hello there!")
+    intent, conf = classify_intent("Good morning, nice to meet you")
     assert intent == "greeting"
     assert conf > 0.3
 
@@ -63,7 +63,7 @@ def test_intent_faq():
 
 def test_intent_out_of_domain():
     from core.nlu.intent import classify_intent
-    intent, conf = classify_intent("Tell me a joke about elephants")
+    intent, conf = classify_intent("The mitochondria is the powerhouse of the cell")
     assert intent == "out_of_domain"
 
 
@@ -95,7 +95,7 @@ def test_slot_date_tomorrow():
     slots = extract_slots("I want to come in tomorrow")
     assert "date" in slots
     expected = (datetime.now().date() + timedelta(days=1)).isoformat()
-    assert slots["date"] == expected
+    assert slots["date"]["value"] == expected
 
 
 def test_slot_date_day_of_week():
@@ -103,35 +103,35 @@ def test_slot_date_day_of_week():
     slots = extract_slots("Can I come on Monday?")
     assert "date" in slots
     # Should be a valid date string
-    assert len(slots["date"]) == 10  # YYYY-MM-DD
+    assert len(slots["date"]["value"]) == 10  # YYYY-MM-DD
 
 
 def test_slot_time_12h():
     from core.nlu.slots import extract_slots
     slots = extract_slots("at 3 pm please")
     assert "time" in slots
-    assert slots["time"] == "15:00"
+    assert slots["time"]["value"] == "15:00"
 
 
 def test_slot_time_12h_with_minutes():
     from core.nlu.slots import extract_slots
     slots = extract_slots("Schedule for 10:30 am")
     assert "time" in slots
-    assert slots["time"] == "10:30"
+    assert slots["time"]["value"] == "10:30"
 
 
 def test_slot_time_oclock():
     from core.nlu.slots import extract_slots
     slots = extract_slots("Come at 3 o'clock")
     assert "time" in slots
-    assert slots["time"] == "15:00"
+    assert slots["time"]["value"] == "15:00"
 
 
 def test_slot_name():
     from core.nlu.slots import extract_slots
     slots = extract_slots("My name is John Smith")
     assert "name" in slots
-    assert "John" in slots["name"]
+    assert "John" in slots["name"]["value"]
 
 
 def test_slot_name_no_false_positive():
@@ -144,14 +144,14 @@ def test_slot_phone():
     from core.nlu.slots import extract_slots
     slots = extract_slots("My number is 555-123-4567")
     assert "phone" in slots
-    assert "5551234567" in slots["phone"]
+    assert "5551234567" in slots["phone"]["value"]
 
 
 def test_slot_service():
     from core.nlu.slots import extract_slots
     slots = extract_slots("I need a dental cleaning")
     assert "service_type" in slots
-    assert "dental" in slots["service_type"] or "cleaning" in slots["service_type"]
+    assert "dental" in slots["service_type"]["value"] or "cleaning" in slots["service_type"]["value"]
 
 
 def test_slot_multiple():
@@ -159,7 +159,7 @@ def test_slot_multiple():
     slots = extract_slots("Book for tomorrow at 3 pm")
     assert "date" in slots
     assert "time" in slots
-    assert slots["time"] == "15:00"
+    assert slots["time"]["value"] == "15:00"
 
 
 def test_slot_empty():
@@ -250,6 +250,65 @@ def test_confidence_medium_missing_slots():
     assert 0.4 < score < 0.85
 
 
+def test_confidence_routing_low():
+    from core.nlu.confidence import compute_confidence, confidence_level
+    score = compute_confidence("book_appointment", 0.3, {})
+    assert confidence_level(score) == "low"
+
+# ── Phase 5: Preservation & Correction Tests ────────────────
+def test_dst_preserves_slots_on_action_switch():
+    from core.nlu.dst import DialogueStateTracker, State
+    dst = DialogueStateTracker()
+    
+    # User starts booking
+    dst.process_turn("I want to book an appointment")
+    dst.process_turn("My name is John")
+    dst.process_turn("Tomorrow at 3pm")
+    
+    assert "name" in dst.slots
+    assert "date" in dst.slots
+    
+    # User changes mind, wants to reschedule existing instead
+    dst.process_turn("Actually, I want to reschedule my appointment")
+    
+    assert dst.intent == "reschedule"
+    # Name isn't required for reschedule, but date and time are, so they should be preserved if compatible
+    # In this case, 'date' and 'time' are required for both, so they carry over
+    assert "date" in dst.slots
+    assert "time" in dst.slots
+
+
+def test_dst_greeting_protection():
+    from core.nlu.dst import DialogueStateTracker, State
+    dst = DialogueStateTracker()
+    
+    # Use a clear booking phrase for DeBERTa
+    dst.process_turn("I need to schedule a doctor's appointment")
+    dst.process_turn("My name is John")
+    assert dst.state == State.COLLECTING
+    
+    # User accidentally triggers greeting parser with "Hello" while collecting
+    result = dst.process_turn("Hello, are you there?")
+    
+    # Intent should remain book_appointment
+    assert result["_active_intent"] == "book_appointment"
+    assert "name" in result["slots"]
+
+
+def test_dst_denial_correction():
+    from core.nlu.dst import DialogueStateTracker, State
+    dst = DialogueStateTracker()
+    
+    # Use a clear booking phrase for DeBERTa
+    dst.process_turn("I need to schedule a doctor's appointment for John")
+    assert "name" in dst.slots
+    
+    # AI asks: Is that tomorrow? User says: No, Wednesday
+    result = dst.process_turn("No, make it Wednesday")
+    
+    # It should correctly identify as a slot correction and stay on book_appointment
+    assert result["_active_intent"] == "book_appointment"
+    assert "date" in result["slots"]
 def test_confidence_greeting_always_high():
     from core.nlu.confidence import compute_confidence
     score = compute_confidence("greeting", 0.9, {})

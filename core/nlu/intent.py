@@ -10,6 +10,7 @@ user's utterance and hypothesis templates like "The caller wants to {intent}".
 Supported intents:
 - book_appointment, cancel_appointment, reschedule
 - check_status, faq, greeting, goodbye, complaint, transfer_to_human
+- confirmation, denial, information_provision, help, repeat
 - out_of_domain (fallback when top score < threshold)
 
 Model: MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33 (22M params)
@@ -45,6 +46,12 @@ INTENT_LABELS = {
     "faq": "asking about business information",
     "complaint": "complaining",
     "transfer_to_human": "requesting a human agent",
+    # v3: conversational intents
+    "confirmation": "confirming or agreeing",
+    "denial": "denying or disagreeing",
+    "information_provision": "providing requested information",
+    "help": "asking what services or options are available",
+    "repeat": "asking to repeat or say something again",
 }
 
 # Candidate labels for the zero-shot pipeline

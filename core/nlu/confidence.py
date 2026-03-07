@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Required slots per intent (mirrors DST)
 REQUIRED_SLOTS = {
-    "book_appointment": ["date", "time", "name"],
+    "book_appointment": ["service_type", "date", "time", "name"],
     "cancel_appointment": ["name"],
     "reschedule": ["date", "time"],
     "check_status": ["name"],
@@ -36,6 +36,7 @@ def compute_confidence(
     intent: str,
     intent_confidence: float,
     slots: dict[str, Any],
+    pending_slot: str | None = None,
 ) -> float:
     """
     Compute overall NLU confidence score.
@@ -43,11 +44,13 @@ def compute_confidence(
     Combines:
     - Intent classifier confidence (70% weight) — DeBERTa is well-calibrated
     - Slot fill percentage (30% weight)
+    - Context-weighting: Boost if pending_slot is filled
 
     Args:
         intent: Classified intent name
         intent_confidence: Raw DeBERTa confidence (0.0-1.0)
         slots: Currently filled slots
+        pending_slot: The slot the system is actively waiting for
 
     Returns:
         Overall confidence score (0.0-1.0)
@@ -68,6 +71,12 @@ def compute_confidence(
         slot_score = SLOT_WEIGHT
 
     overall = intent_score + slot_score
+    
+    # Context-weighted boost
+    if pending_slot and pending_slot in slots:
+        boost = 0.15
+        overall = min(1.0, overall + boost)
+        logger.debug(f"Confidence boost! pending_slot '{pending_slot}' filled (+{boost})")
 
     logger.debug(
         f"Confidence: intent={intent_confidence:.2f}×{INTENT_WEIGHT}={intent_score:.2f} "

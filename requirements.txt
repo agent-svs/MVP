@@ -1,39 +1,45 @@
 # ============================================================
-# AI Voice Receptionist — Stable Production Dependencies
-# Python 3.14 (Apple Silicon Compatible)
+# AI Voice Receptionist — Pinned Production Dependencies
+# Python 3.11.x REQUIRED (3.11.9+ recommended)
+#
+# All versions pinned for reproducibility. Pre-built binary
+# wheels available for macOS (ARM/x86), Linux, and Windows.
+# Do NOT change without full compatibility testing.
 # ============================================================
 
-# Core
-python-dotenv==1.2.2
-fastapi>=0.128.0
-uvicorn>=0.30.0
+# ---------- Core ----------
+python-dotenv==1.0.1
+fastapi==0.115.6
+uvicorn==0.32.1
 
-# Audio
-sounddevice==0.5.5
-numpy==2.4.2
-scipy==1.17.1
+# ---------- Audio ----------
+sounddevice==0.5.1
+numpy==1.26.4               # last 1.x — max compat with torch/scipy/coqui
+scipy==1.14.1               # pre-built wheels for 3.11 on all platforms
 noisereduce==3.0.3
 
-# VAD
-silero-vad==6.2.1
+# ---------- VAD ----------
+silero-vad==5.1.2
 
-# PyTorch
-torch==2.10.0
-torchaudio==2.10.0
+# ---------- PyTorch ----------
+torch==2.5.1                # LTS-grade; official 3.11 wheels all platforms
+torchaudio==2.5.1           # must match torch version
 
-# STT
-faster-whisper==1.2.1
+# ---------- STT ----------
+faster-whisper==1.1.0       # uses CTranslate2 4.x (3.11 wheels available)
 
-# TTS
-coqui-tts>=0.27.0
-transformers==5.0.0
+# ---------- TTS ----------
+coqui-tts==0.27.5           # XTTS v2; requires Python >=3.10,<3.15
+transformers==4.57.6        # last 4.x; satisfies coqui-tts >=4.57 requirement
 
-# LLM
-google-genai==1.65.0
+# ---------- LLM ----------
+google-genai==1.7.0
 
-# NLU (DeBERTa intent + BERT NER via transformers, already listed above)
+# ---------- NLU ----------
+# Intent: DeBERTa v3 xsmall (via transformers, pinned above)
+# NER:    BERT base NER     (via transformers, pinned above)
 python-dateutil==2.9.0.post0
 
-# Testing
-pytest==9.0.2
-pytest-asyncio>=0.23.0
+# ---------- Testing ----------
+pytest==8.3.3
+pytest-asyncio==0.24.0

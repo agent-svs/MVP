@@ -58,6 +58,10 @@ SLOT_PROMPTS = {
         "What type of service are you looking for?",
         "Which service would you like to book?",
     ],
+    "doctor_name": [
+        "Which doctor would you like to see?",
+        "Do you have a preferred doctor?",
+    ],
 }
 
 # ── Greetings & Goodbyes ────────────────────────────────────
@@ -166,10 +170,24 @@ def get_action_response(intent: str, slots: dict) -> str:
         return get_booking_confirmed(slots)
     elif intent == "cancel_appointment":
         return get_cancel_confirmed(slots)
-    elif intent == "reschedule":
+    elif intent in ("reschedule", "reschedule_appointment"):
         return get_reschedule_confirmed(slots)
-    elif intent == "check_status":
+    elif intent in ("check_status", "check_appointment_status"):
         return random.choice(STATUS_RESPONSE).format(name=slots.get("name", ""))
+    elif intent == "check_my_appointments":
+        return f"Let me look up your appointments, {slots.get('name', '')}. One moment please."
+    elif intent == "change_date":
+        return f"Your appointment date has been updated to {slots.get('date', 'the new date')}. All good?"
+    elif intent == "change_doctor":
+        return f"Your appointment has been updated to see {slots.get('doctor_name', 'the new doctor')}. Is that correct?"
+    elif intent == "change_service":
+        return f"Your appointment service has been changed to {slots.get('service_type', 'the new service')}. Anything else?"
+    elif intent == "register_new_patient":
+        return f"Welcome, {slots.get('name', '')}! You've been registered. Is there anything else you need?"
+    elif intent == "update_contact_info":
+        return f"Your contact information has been updated, {slots.get('name', '')}. Anything else?"
+    elif intent == "verify_patient_identity":
+        return f"Thank you, {slots.get('name', '')}. Your identity has been verified."
     elif intent == "greeting":
         return get_greeting()
     elif intent == "goodbye":

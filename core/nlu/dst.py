@@ -1,12 +1,15 @@
 """
-Dialogue State Tracker — FSM (v2 — ML-calibrated)
+Dialogue State Tracker — FSM (v3 — NER-first pipeline)
 
 Tracks the conversation state across turns:
 - Current intent and filled/missing slots
 - State transitions: GREETING → COLLECTING → CONFIRMING → EXECUTING → DONE
 - Slot corrections ("actually, make it Tuesday")
 - Turn counting for loop detection
-- Handles new intents: complaint, transfer_to_human
+- 27-intent support with pending_slot expectation logic
+
+Pipeline order (every turn):
+  NER (unconditional) → pending_slot check → conditional intent → DST update
 
 Updated for ML-based NLU (DeBERTa intent + BERT NER slots).
 """
@@ -15,6 +18,9 @@ import logging
 import re
 from enum import Enum
 from typing import Any, Optional
+
+# Confidence threshold for accepting NER slot fills
+SLOT_CONFIDENCE_THRESHOLD = 0.75
 
 from core.nlu.intent import classify_intent
 from core.nlu.slots import extract_slots
@@ -38,12 +44,24 @@ class State(str, Enum):
     DONE = "done"
 
 
-# Required slots per intent
+# Required slots per intent (27-label set)
 REQUIRED_SLOTS = {
     "book_appointment": ["service_type", "date", "time", "name"],
     "cancel_appointment": ["name"],
-    "reschedule": ["date", "time"],
-    "check_status": ["name"],
+    "reschedule_appointment": ["date", "time"],
+    "check_appointment_status": ["name"],
+    "check_my_appointments": ["name"],
+    "change_date": ["date"],
+    "change_doctor": ["doctor_name"],
+    "change_service": ["service_type"],
+    "register_new_patient": ["name", "phone"],
+    "update_contact_info": ["name", "phone"],
+    "verify_patient_identity": ["name"],
+    "confirm_appointment": [],
+    # These intents require no slots:
+    # greeting, goodbye, complaint, transfer_to_human, confirmation, denial,
+    # help, repeat, clinic_hours, clinic_location, consultation_fee,
+    # doctor_specialization, services_available, emergency_request
 }
 
 
@@ -89,10 +107,13 @@ class DialogueStateTracker:
         """
         Process a user utterance and update state.
 
-        If the AI just asked for a specific slot (pending_slot is set),
-        we first try to extract that slot from the utterance. If found,
-        we fill it and skip intent classification — the user was just
-        answering our question.
+        Pipeline order (strict, every turn):
+          1. NER runs unconditionally on raw text
+          2. Check pending_slot flag in DST
+          3. If pending_slot filled with conf >= 0.75 → skip intent classifier
+          4. Otherwise → run intent classifier
+          5. Dual low-confidence check → trigger clarification if both fail
+          6. DST update → build result
 
         Args:
             text: User utterance
@@ -102,22 +123,39 @@ class DialogueStateTracker:
         """
         self.turn_count += 1
 
-        # Extract slots from this utterance (always do this)
+        # ── Step 1: NER runs unconditionally ────────────────────
         new_slots = extract_slots(text)
 
-        # ── Expected-slot shortcut ──────────────────────────────
+        # ── Step 2+3: Expected-slot check with confidence gating ─
         # If we asked for a specific slot and the user provided it,
         # skip intent classification — this is just an answer.
         if self._try_fill_expected_slot(text, new_slots):
-            # Merge any other extracted slots too
+            # Merge any bonus slots found by NER beyond the pending one
             self.slots.update(new_slots)
             self._update_state()
             return self._build_result(text)
 
-        # ── Normal flow: classify intent ────────────────────────
+        # ── Step 4: Intent classification (conditional path) ────
         new_intent, confidence = classify_intent(text)
         self._last_classified_intent = new_intent
 
+        # ── Step 5: Dual low-confidence check ───────────────────
+        # If NER found nothing useful AND intent classifier has low
+        # confidence while we're actively collecting, don't guess.
+        if (not new_slots and confidence < 0.40
+                and self.state == State.COLLECTING and self.intent is not None):
+            self.failed_turns += 1
+            logger.info(
+                f"Dual low-confidence: no slots extracted + "
+                f"intent conf={confidence:.2f} < 0.40 → clarification"
+            )
+            self._last_classified_intent = "clarification_needed"
+            self.pending_slot = None
+            self.last_question = None
+            self._update_state()
+            return self._build_result(text)
+
+        # ── Step 6: Normal intent processing ────────────────────
         # Detect slot corrections ("actually, make it Tuesday")
         is_correction = self._is_slot_correction(text, new_slots, new_intent)
 
@@ -126,19 +164,15 @@ class DialogueStateTracker:
             # Slot correction — keep current intent, update slots
             logger.info(f"Slot correction detected: {new_slots}")
             self.slots.update(new_slots)
-            
-            # Since we're keeping the current intent but the user said "no" or "make it",
-            # we need to make sure _build_result doesn't treat it as the original intent.
-            # We want to treat this turn as a slot correction / continuation.
             self._last_classified_intent = "correction"
         elif self._is_new_conversation(new_intent, confidence):
-            # New intent — preserve compatible slots if transferring between action intents
+            # New intent — preserve compatible slots if transferring
             preserved_slots = {}
             if self.intent in REQUIRED_SLOTS and new_intent in REQUIRED_SLOTS:
                 for key, val in self.slots.items():
                     if key in REQUIRED_SLOTS[new_intent]:
                         preserved_slots[key] = val
-                        
+
             self.intent = new_intent
             self.intent_confidence = confidence
             self.slots = preserved_slots
@@ -147,16 +181,11 @@ class DialogueStateTracker:
         else:
             # Continuation — merge slots (new values override old)
             self.slots.update(new_slots)
-            # Update confidence if higher
             if confidence > self.intent_confidence:
                 self.intent_confidence = confidence
-            
-            # Since this is a continuation (not a new conversation), we want to
-            # keep the active intent intact. Track this so _build_result knows.
-            # The only exception is if it was already marked as something else
-            # (like 'continuation' from _is_new_conversation).
+
             if not getattr(self, '_last_classified_intent', None) == "continuation":
-                 self._last_classified_intent = "continuation"
+                self._last_classified_intent = "continuation"
 
         # Clear pending expectation (we've processed this turn)
         self.pending_slot = None
@@ -170,8 +199,13 @@ class DialogueStateTracker:
     def _try_fill_expected_slot(self, text: str, new_slots: dict) -> bool:
         """Try to fill the pending expected slot.
 
-        If the AI asked 'What date?' and the user said 'Tomorrow at 3 PM',
-        we find 'date' in new_slots and fill it without re-classifying intent.
+        Three-path resolution:
+          Path 1: NER extracted the expected slot with conf >= threshold → fill it
+          Path 2: NER missed it, but raw text looks like a direct answer → fill via fallback
+          Path 3: NER extracted other (bonus) slots while collecting → treat as continuation
+
+        Any additional slots found by NER beyond the pending one are treated
+        as bonus fills and also written to DST (handled by caller).
 
         Returns True if the expected slot was filled (skip intent classification).
         """
@@ -180,30 +214,117 @@ class DialogueStateTracker:
 
         expected = self.pending_slot
 
-        # Check if the expected slot was extracted
+        # ── Path 1: NER extracted the expected slot directly ────
         if expected in new_slots:
-            logger.info(
-                f"Expected slot '{expected}' filled: {new_slots[expected]} "
-                f"(skipping intent classification)"
+            slot_data = new_slots[expected]
+            slot_conf = (
+                slot_data.get("confidence", 0.0)
+                if isinstance(slot_data, dict) else 1.0
             )
-            self.pending_slot = None
-            self.last_question = None
-            return True
+            if slot_conf >= SLOT_CONFIDENCE_THRESHOLD:
+                logger.info(
+                    f"Expected slot '{expected}' filled via NER "
+                    f"(conf={slot_conf:.2f}): {slot_data} "
+                    f"→ skipping intent classification"
+                )
+                self.pending_slot = None
+                self.last_question = None
+                return True
+            else:
+                logger.debug(
+                    f"NER found '{expected}' but conf={slot_conf:.2f} "
+                    f"< {SLOT_CONFIDENCE_THRESHOLD} — trying fallback"
+                )
 
-        # If user gave other slots (provided info but not what we asked),
-        # still treat as continuation if we're collecting
+        # ── Path 2: Raw-text fallback ───────────────────────────
+        # User gave a bare answer to our direct question (e.g., "Cardiology",
+        # "John Smith"). NER couldn't tag it as the right slot type because
+        # it only knows PER/ORG/LOC/MISC, not domain slots.
+        # Only activate for short utterances likely to be direct answers.
+        stripped = text.strip()
+        if len(stripped) < 50 and self.state == State.COLLECTING:
+            fallback_value = self._raw_text_to_slot(expected, stripped)
+            if fallback_value:
+                new_slots[expected] = {
+                    "value": fallback_value,
+                    "confidence": 0.70,
+                }
+                logger.info(
+                    f"Expected slot '{expected}' filled via raw-text "
+                    f"fallback: '{fallback_value}' → skipping intent"
+                )
+                self.pending_slot = None
+                self.last_question = None
+                return True
+
+        # ── Path 3: Got other (bonus) slots while collecting ────
         if new_slots and self.state == State.COLLECTING:
             logger.info(
-                f"Expected '{expected}' not found, but got {list(new_slots.keys())} "
-                f"— treating as continuation"
+                f"Expected '{expected}' not found, but got "
+                f"{list(new_slots.keys())} — treating as continuation"
             )
             self.pending_slot = None
             self.last_question = None
             return True
 
-        # Nothing relevant extracted — fall through to normal intent flow
+        # Nothing relevant — fall through to intent classification
         # (user might have said something unrelated like 'goodbye')
         return False
+
+    def _raw_text_to_slot(
+        self, slot_name: str, text: str
+    ) -> Optional[str]:
+        """Map raw text to a slot value when the user gives a bare answer.
+
+        This is a stopgap for when NER cannot recognize domain-specific
+        entity types (e.g., SERVICE_TYPE, DEPARTMENT). Once the NER model
+        is fine-tuned on domain entities, this fallback becomes redundant.
+
+        Args:
+            slot_name: The slot we're expecting (e.g., 'service_type')
+            text: The raw user utterance, stripped
+
+        Returns:
+            The slot value string, or None if text doesn't look like a valid answer.
+        """
+        text = text.strip().rstrip('.!?,;')
+        if not text:
+            return None
+
+        # Skip obvious non-answers
+        _SKIP_WORDS = {
+            "yes", "no", "ok", "okay", "sure", "hi", "hello",
+            "hey", "bye", "goodbye", "thanks", "thank you",
+            "um", "uh", "hmm",
+        }
+        if text.lower() in _SKIP_WORDS:
+            return None
+
+        # service_type: accept any non-trivial text as the service
+        if slot_name == "service_type":
+            if len(text) >= 2:
+                return text.lower()
+
+        # name: accept if it looks like a proper name (capitalized words)
+        if slot_name == "name":
+            words = text.split()
+            if 1 <= len(words) <= 4 and all(
+                w[0].isupper() for w in words if w
+            ):
+                return text
+
+        # doctor_name: accept with or without Dr. prefix
+        if slot_name == "doctor_name":
+            if len(text) >= 2:
+                return text
+
+        # date / time: these are already well-handled by NER extractors
+        # (dateutil, regex patterns). If NER missed them, the text
+        # probably isn't a date/time.
+
+        # phone: very structured, shouldn't need fallback
+
+        return None
 
     def _build_result(self, text: str) -> dict:
         """Build and log the NLU result dict."""
@@ -213,7 +334,8 @@ class DialogueStateTracker:
         # the classified intent so the router can differentiate, while
         # keeping _active_intent as the real task intent.
         CONVERSATIONAL_INTENTS = {
-            "confirmation", "denial", "information_provision", "repeat", "help", "correction", "continuation",
+            "confirmation", "denial", "information_provision", "repeat",
+            "help", "correction", "continuation", "clarification_needed",
         }
         classified = getattr(self, '_last_classified_intent', None)
         if classified and classified in CONVERSATIONAL_INTENTS:
@@ -262,8 +384,19 @@ class DialogueStateTracker:
         # responses to what the AI said ("yes", "no", "5 PM", "say again")
         CONTINUATION_INTENTS = {
             "confirmation", "denial", "information_provision", "repeat",
+            "confirm_appointment",
         }
         if new_intent in CONTINUATION_INTENTS:
+            return False
+
+        # Change-type intents are modifications to the current flow,
+        # not entirely new conversations — they modify existing slots
+        MODIFICATION_INTENTS = {
+            "change_date", "change_doctor", "change_service",
+        }
+        if new_intent in MODIFICATION_INTENTS and self.state in (
+            State.COLLECTING, State.CONFIRMING
+        ):
             return False
 
         # Explicit conversational intents always start fresh
@@ -272,8 +405,8 @@ class DialogueStateTracker:
         # Always allow transition FROM greeting/out_of_domain to real intents
         if self.intent in ("greeting", "out_of_domain") and new_intent not in ("greeting", "out_of_domain"):
             return True
-        # Complaint and transfer always override
-        if new_intent in ("complaint", "transfer_to_human"):
+        # Complaint, transfer, and emergency always override
+        if new_intent in ("complaint", "transfer_to_human", "emergency_request"):
             return True
         # "help" only starts new if we're idle or done
         if new_intent == "help":
@@ -327,8 +460,11 @@ class DialogueStateTracker:
     def _update_state(self) -> None:
         """Update the dialogue state based on current intent and slots."""
         # Conversational intents preserve current state
-        # (confirmation/denial/info/repeat don't change what we're doing)
-        if self.intent in ("confirmation", "denial", "information_provision", "repeat", "help"):
+        PRESERVE_STATE_INTENTS = {
+            "confirmation", "denial", "information_provision", "repeat",
+            "help", "confirm_appointment",
+        }
+        if self.intent in PRESERVE_STATE_INTENTS:
             # If we're collecting and all slots filled, advance to confirming
             if self.state == State.COLLECTING and self.intent in REQUIRED_SLOTS:
                 if not self.missing_slots:
@@ -339,10 +475,15 @@ class DialogueStateTracker:
             self.state = State.GREETING
         elif self.intent in ("goodbye",):
             self.state = State.DONE
-        elif self.intent in ("complaint", "transfer_to_human"):
+        elif self.intent in ("complaint", "transfer_to_human", "emergency_request"):
             self.state = State.DONE
-        elif self.intent in ("out_of_domain", "faq"):
-            self.state = State.COLLECTING
+        elif self.intent in (
+            "out_of_domain", "clinic_hours", "clinic_location",
+            "consultation_fee", "doctor_specialization", "services_available",
+        ):
+            # FAQ-type intents: don't override state if already collecting
+            if self.state not in (State.COLLECTING, State.CONFIRMING):
+                self.state = State.COLLECTING
         elif self.intent in REQUIRED_SLOTS:
             missing = self.missing_slots
             if not missing:

@@ -134,33 +134,64 @@ def route(nlu_result: dict) -> RoutingResult:
             metadata={"reason": "user_requested_transfer"},
         )
 
+    # ── Clarification needed (dual low-confidence) ──────────
+    if intent == "clarification_needed":
+        active_intent = nlu_result.get("_active_intent", None)
+        if missing:
+            next_slot = missing[0]
+            logger.info(f"Route → Path B (clarification needed, re-asking '{next_slot}')")
+            return RoutingResult(
+                path=Path.B_CLARIFY,
+                response=f"I didn't quite catch that. {get_slot_prompt(next_slot)}",
+                metadata={"missing_slot": next_slot, "all_missing": missing},
+            )
+        else:
+            logger.info("Route → Path B (clarification needed, generic)")
+            return RoutingResult(
+                path=Path.B_CLARIFY,
+                response="I'm sorry, I didn't understand that. Could you please rephrase?",
+                metadata={"reason": "clarification_needed"},
+            )
+
+    # ── Emergency → immediate escalation ────────────────────
+    if intent == "emergency_request":
+        logger.info("Route → Path E (emergency → escalate)")
+        return RoutingResult(
+            path=Path.E_ESCALATE,
+            response="This sounds urgent. Let me connect you with our emergency team right away. Please stay on the line.",
+            metadata={"reason": "emergency"},
+        )
+
     # ── Out of domain → LLM ────────────────────────────────
     if intent == "out_of_domain":
         logger.info(f"Route → Path C (out of domain)")
         return RoutingResult(
             path=Path.C_LLM,
-            response="",  # LLM will generate
+            response="",
             needs_llm=True,
             filler=get_filler(),
             metadata={"reason": "out_of_domain"},
         )
 
-    # ── FAQ → LLM (Path D in v2, C for now) ────────────────
-    if intent == "faq":
-        logger.info("Route → Path D/C (FAQ → LLM)")
+    # ── FAQ-type intents → LLM ─────────────────────────────
+    FAQ_INTENTS = {
+        "clinic_hours", "clinic_location", "consultation_fee",
+        "doctor_specialization", "services_available",
+    }
+    if intent in FAQ_INTENTS:
+        logger.info(f"Route → Path D/C (FAQ: {intent} → LLM)")
         return RoutingResult(
             path=Path.D_RAG_LLM,
             response="",
             needs_llm=True,
             filler=get_filler(),
-            metadata={"reason": "faq"},
+            metadata={"reason": "faq", "faq_type": intent},
         )
 
-    # ── v3: Conversational intents ──────────────────────────
+    # ── Conversational intents ──────────────────────────────
 
     # Confirmation — user said "yes" / "that's right"
-    # Re-route based on active intent state
-    if intent == "confirmation":
+    if intent in ("confirmation", "confirm_appointment"):
         active_intent = nlu_result.get("_active_intent", intent)
         if not missing and state == "confirming":
             logger.info(f"Route → Path A (confirmed): {active_intent}")
@@ -179,7 +210,6 @@ def route(nlu_result: dict) -> RoutingResult:
             )
 
     # Denial — user said "no" / "that's wrong"
-    # Re-prompt the last asked slot or ask what to change
     if intent == "denial":
         if missing:
             next_slot = missing[0]
@@ -190,7 +220,6 @@ def route(nlu_result: dict) -> RoutingResult:
                 metadata={"missing_slot": next_slot, "all_missing": missing},
             )
         else:
-            # All slots filled but user denied — ask what to change
             logger.info("Route → Path B (denial, asking what to change)")
             return RoutingResult(
                 path=Path.B_CLARIFY,
@@ -198,7 +227,7 @@ def route(nlu_result: dict) -> RoutingResult:
                 metadata={"reason": "denial_correction"},
             )
 
-    # Help — user asking what services/options are available
+    # Help
     if intent == "help":
         logger.info("Route → Path A (help)")
         return RoutingResult(
@@ -206,7 +235,7 @@ def route(nlu_result: dict) -> RoutingResult:
             response=get_help(),
         )
 
-    # Repeat — user asking to say something again
+    # Repeat
     if intent == "repeat":
         logger.info("Route → Path A (repeat)")
         return RoutingResult(
@@ -214,12 +243,11 @@ def route(nlu_result: dict) -> RoutingResult:
             response=get_repeat(),
         )
 
-    # Information provision — user just answering with data
-    # Treat same as active intent with whatever slots are now filled
-    if intent == "information_provision":
+    # Correction / Continuation — user providing slot data
+    if intent in ("correction", "continuation", "information_provision"):
         active_intent = nlu_result.get("_active_intent", "book_appointment")
         if not missing:
-            logger.info(f"Route → Path A (info provided, all filled): {active_intent}")
+            logger.info(f"Route → Path A (slot data provided, all filled): {active_intent}")
             return RoutingResult(
                 path=Path.A_DIRECT,
                 response=get_action_response(active_intent, slots),
@@ -227,19 +255,25 @@ def route(nlu_result: dict) -> RoutingResult:
             )
         else:
             next_slot = missing[0]
-            logger.info(f"Route → Path B (info provided, still need '{next_slot}')")
+            logger.info(f"Route → Path B (slot data, still need '{next_slot}')")
             return RoutingResult(
                 path=Path.B_CLARIFY,
                 response=get_slot_prompt(next_slot),
                 metadata={"missing_slot": next_slot, "all_missing": missing},
             )
 
-    # ── Action intents (book, cancel, reschedule, status) ───
-    ACTION_INTENTS = {"book_appointment", "cancel_appointment", "reschedule", "check_status"}
+    # ── Action intents ──────────────────────────────────────
+    ACTION_INTENTS = {
+        "book_appointment", "cancel_appointment",
+        "reschedule_appointment", "check_appointment_status",
+        "check_my_appointments",
+        "change_date", "change_doctor", "change_service",
+        "register_new_patient", "update_contact_info",
+        "verify_patient_identity",
+    }
 
     if intent in ACTION_INTENTS:
         if not missing:
-            # All slots filled → direct action
             logger.info(f"Route → Path A (direct): {intent} with {slots}")
             return RoutingResult(
                 path=Path.A_DIRECT,
@@ -247,7 +281,6 @@ def route(nlu_result: dict) -> RoutingResult:
                 metadata={"action": intent, "slots": slots},
             )
         else:
-            # Missing slots → ALWAYS clarify (don't fall to LLM)
             next_slot = missing[0]
             logger.info(f"Route → Path B (clarify): asking for '{next_slot}'")
             return RoutingResult(

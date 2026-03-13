@@ -19,12 +19,20 @@ from config import cfg
 
 logger = logging.getLogger(__name__)
 
-# Required slots per intent (mirrors DST)
+# Required slots per intent (mirrors DST — 27-label set)
 REQUIRED_SLOTS = {
     "book_appointment": ["service_type", "date", "time", "name"],
     "cancel_appointment": ["name"],
-    "reschedule": ["date", "time"],
-    "check_status": ["name"],
+    "reschedule_appointment": ["date", "time"],
+    "check_appointment_status": ["name"],
+    "check_my_appointments": ["name"],
+    "change_date": ["date"],
+    "change_doctor": ["doctor_name"],
+    "change_service": ["service_type"],
+    "register_new_patient": ["name", "phone"],
+    "update_contact_info": ["name", "phone"],
+    "verify_patient_identity": ["name"],
+    "confirm_appointment": [],
 }
 
 # Weight split — DeBERTa scores are well-calibrated, give them more weight

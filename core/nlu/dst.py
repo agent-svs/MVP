@@ -6,7 +6,7 @@ Tracks the conversation state across turns:
 - State transitions: GREETING → COLLECTING → CONFIRMING → EXECUTING → DONE
 - Slot corrections ("actually, make it Tuesday")
 - Turn counting for loop detection
-- 27-intent support with pending_slot expectation logic
+- 30-intent support with pending_slot expectation logic
 
 Pipeline order (every turn):
   NER (unconditional) → pending_slot check → conditional intent → DST update
@@ -22,6 +22,7 @@ from typing import Any, Optional
 # Confidence threshold for accepting NER slot fills
 SLOT_CONFIDENCE_THRESHOLD = 0.75
 
+from config import cfg
 from core.nlu.intent import classify_intent
 from core.nlu.slots import extract_slots
 
@@ -44,7 +45,7 @@ class State(str, Enum):
     DONE = "done"
 
 
-# Required slots per intent (27-label set)
+# Required slots per intent (29-label set)
 REQUIRED_SLOTS = {
     "book_appointment": ["service_type", "date", "time", "name"],
     "cancel_appointment": ["name"],
@@ -52,12 +53,14 @@ REQUIRED_SLOTS = {
     "check_appointment_status": ["name"],
     "check_my_appointments": ["name"],
     "change_date": ["date"],
+    "change_time": ["time"],
     "change_doctor": ["doctor_name"],
     "change_service": ["service_type"],
     "register_new_patient": ["name", "phone"],
     "update_contact_info": ["name", "phone"],
     "verify_patient_identity": ["name"],
     "confirm_appointment": [],
+    "doctor_availability": [],
     # These intents require no slots:
     # greeting, goodbye, complaint, transfer_to_human, confirmation, denial,
     # help, repeat, clinic_hours, clinic_location, consultation_fee,
@@ -142,12 +145,12 @@ class DialogueStateTracker:
         # ── Step 5: Dual low-confidence check ───────────────────
         # If NER found nothing useful AND intent classifier has low
         # confidence while we're actively collecting, don't guess.
-        if (not new_slots and confidence < 0.40
+        if (not new_slots and confidence < cfg.nlu.confidence_low
                 and self.state == State.COLLECTING and self.intent is not None):
             self.failed_turns += 1
             logger.info(
                 f"Dual low-confidence: no slots extracted + "
-                f"intent conf={confidence:.2f} < 0.40 → clarification"
+                f"intent conf={confidence:.2f} < cfg '{cfg.nlu.confidence_low}' → clarification"
             )
             self._last_classified_intent = "clarification_needed"
             self.pending_slot = None

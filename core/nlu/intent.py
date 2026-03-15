@@ -1,7 +1,7 @@
 """
 Intent Classifier — DeBERTa v3 Zero-Shot / Fine-Tuned (v3)
 
-Classifies user utterances into 27 intents.
+Classifies user utterances into 30 intents.
 
 Two modes:
   1. Zero-shot (default): Uses DeBERTa v3 xsmall NLI model, tests entailment
@@ -18,6 +18,8 @@ import re
 import time
 from typing import Optional
 
+from config import cfg
+
 logger = logging.getLogger(__name__)
 
 # ── Greeting prefix pattern ─────────────────────────────────
@@ -29,7 +31,7 @@ _GREETING_PREFIX_RE = re.compile(
     re.IGNORECASE
 )
 
-# ── Intent Definitions (27-label set) ────────────────────────
+# ── Intent Definitions (30-label set) ────────────────────────
 # Each intent has a label used for zero-shot classification
 # and a natural-language hypothesis template.
 # When fine-tuned, the hypothesis is not used — the model
@@ -52,6 +54,7 @@ INTENT_LABELS = {
     "check_my_appointments": "checking or listing my appointments",
     # Modification actions
     "change_date": "changing the appointment date",
+    "change_time": "changing the appointment time",
     "change_doctor": "changing the assigned doctor",
     "change_service": "changing the type of service",
     # Patient management
@@ -63,11 +66,14 @@ INTENT_LABELS = {
     "clinic_location": "asking about clinic location or address",
     "consultation_fee": "asking about consultation fees or costs",
     "doctor_specialization": "asking about doctor specialization or expertise",
+    "doctor_availability": "asking about doctor availability or schedule",
     "services_available": "asking about available services",
     # Escalation
     "complaint": "complaining about service",
     "transfer_to_human": "requesting a human agent",
     "emergency_request": "reporting an emergency or urgent situation",
+    # Fallback
+    "out_of_domain": "off-topic or unrelated to clinic services",
 }
 
 # Candidate labels for the zero-shot pipeline
@@ -78,6 +84,9 @@ LABEL_TO_INTENT = {v: k for k, v in INTENT_LABELS.items()}
 INTENT_LABEL_LIST = list(INTENT_LABELS.keys())
 
 # Minimum confidence threshold — below this → out_of_domain
+# Zero-shot naturally has lower text-entailment scores. 
+# Fine-tuned models use the .env threshold.
+# Evaluated dynamically during inference
 MIN_CONFIDENCE = 0.20
 
 # Hypothesis template — optimized for DeBERTa v3 xsmall NLI
@@ -85,12 +94,8 @@ HYPOTHESIS_TEMPLATE = "This text is about {}."
 
 # ── Lazy-loaded model ───────────────────────────────────────
 _classifier = None
-_model_name = os.getenv(
-    "INTENT_MODEL",
-    "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
-)
-_is_fine_tuned = os.getenv("INTENT_FINE_TUNED", "false").lower() == "true"
-
+_model_name = None
+_is_fine_tuned = False
 
 def _load_model():
     """Load the classification pipeline (once).
@@ -99,9 +104,17 @@ def _load_model():
       - Zero-shot: zero-shot-classification pipeline with hypothesis template
       - Fine-tuned: standard text-classification pipeline
     """
-    global _classifier
+    global _classifier, _model_name, _is_fine_tuned, MIN_CONFIDENCE
     if _classifier is not None:
         return
+
+    # Read configuration now that config.py has loaded .env
+    _model_name = os.getenv(
+        "INTENT_MODEL",
+        "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+    )
+    _is_fine_tuned = os.getenv("INTENT_FINE_TUNED", "false").lower() == "true"
+    MIN_CONFIDENCE = cfg.nlu.confidence_low if _is_fine_tuned else 0.20
 
     from transformers import pipeline
 
@@ -111,6 +124,7 @@ def _load_model():
         _classifier = pipeline(
             "text-classification",
             model=_model_name,
+            top_k=1,
             device="cpu",
         )
         elapsed = time.time() - t0
@@ -162,9 +176,10 @@ def classify_intent(text: str) -> tuple[str, float]:
     if _is_fine_tuned:
         # ── Fine-tuned path ──────────────────────────────
         result = _classifier(classify_text)
-        # Result format: [{"label": "book_appointment", "score": 0.95}]
-        top_label = result[0]["label"]
-        top_score = result[0]["score"]
+        # Result format: [[{"label": "book_appointment", "score": 0.95}]]
+        top = result[0] if isinstance(result[0], dict) else result[0][0]
+        top_label = top["label"]
+        top_score = top["score"]
         intent = top_label if top_label in INTENT_LABELS else "out_of_domain"
     else:
         # ── Zero-shot path ───────────────────────────────

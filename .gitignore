@@ -32,3 +32,6 @@ Thumbs.db
 # Misc files
 download.png
 random.txt
+
+# Fine-tuned model weights (download via HuggingFace Hub or train locally)
+models/

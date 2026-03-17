@@ -111,6 +111,8 @@ class NLUConfig:
     """NLU routing thresholds."""
     confidence_high: float = 0.80
     confidence_low: float = 0.50
+    joint_nlu_enabled: bool = False
+    joint_nlu_model_path: str = "models/joint_nlu/"
 
 
 @dataclass
@@ -182,6 +184,8 @@ class Config:
         nlu = NLUConfig(
             confidence_high=_get_env_float("NLU_CONFIDENCE_HIGH", 0.80),
             confidence_low=_get_env_float("NLU_CONFIDENCE_LOW", 0.50),
+            joint_nlu_enabled=_get_env("JOINT_NLU_ENABLED", "false").lower() == "true",
+            joint_nlu_model_path=_get_env("JOINT_NLU_MODEL_PATH", "models/joint_nlu/"),
         )
 
         return cls(

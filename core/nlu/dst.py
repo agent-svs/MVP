@@ -106,7 +106,12 @@ class DialogueStateTracker:
         self.last_question = question
         logger.debug(f"Expectation set: pending_slot='{slot_name}'")
 
-    def process_turn(self, text: str) -> dict:
+    def process_turn(
+        self, 
+        text: str, 
+        system_context: str = "", 
+        joint_nlu_engine: Optional[Any] = None
+    ) -> dict:
         """
         Process a user utterance and update state.
 
@@ -124,6 +129,9 @@ class DialogueStateTracker:
         Returns:
             Dict with: intent, confidence, slots, state, missing_slots, action
         """
+        if cfg.nlu.joint_nlu_enabled:
+            return self._process_turn_joint(text, system_context, joint_nlu_engine)
+            
         self.turn_count += 1
 
         # ── Step 1: NER runs unconditionally ────────────────────
@@ -197,6 +205,65 @@ class DialogueStateTracker:
         # Update state
         self._update_state()
 
+        return self._build_result(text)
+
+    def _process_turn_joint(self, text: str, system_context: str, joint_nlu_engine) -> dict:
+        """
+        Process a turn using the unified Joint NLU Model.
+        Replaces the separate NER + intent pipeline.
+        """
+        self.turn_count += 1
+        
+        if not joint_nlu_engine:
+            raise RuntimeError("Joint NLU enabled but engine not provided to DST.")
+            
+        prediction = joint_nlu_engine.predict(system_context, text)
+        new_intent = prediction["intent"]
+        confidence = prediction["intent_confidence"]
+        new_slots = prediction["slots"]
+        
+        self._last_classified_intent = new_intent
+        
+        # State transitions
+        if new_intent is None or new_intent == "slot_answer":
+            new_intent = None
+            # Slot answer (continuation)
+            self._last_classified_intent = "continuation"
+            self.slots.update(new_slots)
+        else:
+            is_correction = self._is_slot_correction(text, new_slots, new_intent)
+            
+            if is_correction:
+                logger.info(f"Slot correction detected: {new_slots}")
+                self.slots.update(new_slots)
+                self._last_classified_intent = "correction"
+            elif self._is_new_conversation(new_intent, confidence):
+                preserved_slots = {}
+                if self.intent in REQUIRED_SLOTS and new_intent in REQUIRED_SLOTS:
+                    for key, val in self.slots.items():
+                        if key in REQUIRED_SLOTS[new_intent]:
+                            preserved_slots[key] = val
+                            
+                self.intent = new_intent
+                self.intent_confidence = confidence
+                self.slots = preserved_slots
+                self.slots.update(new_slots)
+                self.failed_turns = 0
+            else:
+                self.slots.update(new_slots)
+                if confidence > self.intent_confidence:
+                    self.intent_confidence = confidence
+                    
+                if not getattr(self, '_last_classified_intent', None) == "continuation":
+                    self._last_classified_intent = "continuation"
+        
+        # Clear pending (not really used in joint model, but good to clean up)
+        self.pending_slot = None
+        self.last_question = None
+        
+        # Update state
+        self._update_state()
+        
         return self._build_result(text)
 
     def _try_fill_expected_slot(self, text: str, new_slots: dict) -> bool:

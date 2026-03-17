@@ -57,6 +57,8 @@ class VoicePipeline:
         self._turn_count = 0
         self._is_speaking_response = False  # True while TTS is playing
         self._barge_in_detected = False
+        self._last_response = ""
+        self.joint_nlu = None
 
     def load_models(self) -> None:
         """Pre-load all ML models at startup."""
@@ -67,11 +69,17 @@ class VoicePipeline:
         self.tts.load()
         # LLM is lazy-loaded on first call
 
-        # Pre-load NLU models (DeBERTa intent + BERT NER)
-        from core.nlu.intent import _load_model as load_intent_model
-        from core.nlu.slots import _load_ner as load_ner_model
-        load_intent_model()
-        load_ner_model()
+        # Pre-load NLU models
+        if cfg.nlu.joint_nlu_enabled:
+            from core.nlu.joint_nlu import JointNLU
+            self.joint_nlu = JointNLU()
+            self.joint_nlu.load(cfg.nlu.joint_nlu_model_path)
+            logger.info("Loaded custom JointNLU model successfully")
+        else:
+            from core.nlu.intent import _load_model as load_intent_model
+            from core.nlu.slots import _load_ner as load_ner_model
+            load_intent_model()
+            load_ner_model()
 
         elapsed = time.time() - t0
         logger.info(f"All models loaded in {elapsed:.1f}s")
@@ -122,7 +130,11 @@ class VoicePipeline:
         print(f"\n  👤 You: \"{text}\" ({stt_elapsed:.2f}s)")
 
         # 3. NLU: classify intent + extract slots
-        nlu_result = self.dst.process_turn(text)
+        nlu_result = self.dst.process_turn(
+            text, 
+            system_context=self._last_response, 
+            joint_nlu_engine=self.joint_nlu
+        )
         intent = nlu_result["intent"]
         slots = nlu_result["slots"]
 
@@ -152,7 +164,7 @@ class VoicePipeline:
 
         # 5b. Set expectation for clarify responses
         # When the AI asks "What date?", tell the DST to expect a date next turn
-        if routing.path.value == "clarify" and routing.metadata:
+        if not cfg.nlu.joint_nlu_enabled and routing.path.value == "clarify" and routing.metadata:
             next_slot = routing.metadata.get("missing_slot")
             if next_slot:
                 self.dst.set_expectation(next_slot, response)
@@ -164,6 +176,7 @@ class VoicePipeline:
                 print(f"  ⚠️  {w}")
 
         final_response = guard_result.text
+        self._last_response = final_response
 
         # 7. Speak response (with barge-in monitoring)
         total_elapsed = time.time() - t0

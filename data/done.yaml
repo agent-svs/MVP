@@ -1,0 +1,1103 @@
+strictly follow the commands and generate diverse dataset, that represents the normal and vague and casual human utterance not bookish, specially for indian english 
+# ============================================================
+# Configuration — Joint NLU Dataset Generation
+# AI Voice Receptionist (Clinic/Hospital Domain)
+#
+# Generates context-aware examples for a Joint Intent + Slot model.
+# Each example has:
+#   - context:   The system's previous utterance (what the AI just said)
+#   - utterance:  The user's current response
+#   - intent:     One of 30 intent labels (or "slot_answer" for bare answers)
+#   - slots:      Dict of {slot_type: value} extracted from the utterance
+#
+# CRITICAL PROBLEM THIS DATASET SOLVES:
+#   Humans speak in short, context-dependent ways. "Okay", "Cardiology",
+#   "Tomorrow", "John" — these are valid slot answers when the system just
+#   asked a direct question, but they look like random words without context.
+#   A separate NER + intent classifier pipeline fails on these because:
+#     1. NER extracts "Okay" as a confirmation when it's just filler
+#     2. Intent classifier tries to find an intent for "Cardiology" 
+#        (a service name, not an intent)
+#     3. One-word answers get misclassified as greetings or out-of-domain
+#
+#   The joint model receives BOTH the system context AND the user utterance,
+#   so it can distinguish:
+#     Context: "Is Thursday okay?" + User: "Okay" → confirmation
+#     Context: "What service?"     + User: "Okay, cardiology" → slot_answer
+#     Context: (first turn)        + User: "Okay hi" → greeting
+#
+# VALID SLOT TYPES:
+#   service_type   — The medical service (cardiology, dermatology, dental, etc.)
+#   date           — Appointment date (tomorrow, Monday, March 15th, next week, etc.)
+#   time           — Appointment time (3pm, 10:30 am, morning, afternoon, etc.)
+#   patient_name   — Patient's full name (John Smith, Maria Garcia, etc.)
+#   doctor_name    — Doctor's name (Dr. Patel, Dr. Sarah Wilson, etc.)
+#   phone          — Phone number (555-123-4567, 9876543210, etc.)
+#   department     — Hospital department (emergency, pediatrics, radiology, etc.)
+#
+# VALID INTENT LABELS (30 + slot_answer):
+#   slot_answer, greeting, goodbye, confirmation, denial, help, repeat,
+#   book_appointment, cancel_appointment, reschedule_appointment,
+#   confirm_appointment, check_appointment_status, check_my_appointments,
+#   change_date, change_time, change_doctor, change_service,
+#   register_new_patient, update_contact_info, verify_patient_identity,
+#   clinic_hours, clinic_location, consultation_fee,
+#   doctor_specialization, doctor_availability, services_available,
+#   complaint, transfer_to_human, emergency_request, out_of_domain
+# ============================================================
+
+objectives:
+
+  # ================================================================
+  # SLOT_ANSWER — THE MOST CRITICAL INTENT (bare answers to questions)
+  # ================================================================
+  # This is the hardest category. The user gives a short, direct answer 
+  # to a question the system just asked. Without context, these look 
+  # meaningless. With context, they are clearly slot fills.
+  # ================================================================
+
+  - name: "Slot Answer — Service Type"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      THE PROBLEM: When the AI asks "What service do you need?" and the user replies 
+      with just "Cardiology" or "I need dental", a naive NLU model tries to classify 
+      this as an intent and fails — because it's NOT an intent, it's a SLOT ANSWER.
+      The user is answering the AI's question with a service type value.
+      
+      Generate realistic user utterances where the user is ANSWERING a question about 
+      what medical service they need. The AI (system) has just asked about the service.
+      
+      RULES:
+      - The context MUST be a system question asking about the service type
+      - The utterance is the user's answer — can be bare ("Cardiology"), casual 
+        ("Umm, I think cardiology"), or embedded ("I'd like to see someone about my skin")
+      - intent MUST be "slot_answer"
+      - slots MUST contain "service_type" with the extracted service value
+      - Include filler words like "okay", "umm", "well", "yeah", "so" naturally
+      - Include hesitations: "I think...", "Maybe...", "Probably..."
+      - Include both specific services (cardiology, dermatology) and vague descriptions 
+        ("something for my heart", "skin issues", "pain in my teeth")
+      - Some utterances should be just ONE WORD (the service name alone)
+      
+      Medical services to use: cardiology, dermatology, dental, orthopedics, 
+      pediatrics, ophthalmology, neurology, psychiatry, general checkup, 
+      ENT, gynecology, urology, physiotherapy, radiology, oncology, 
+      gastroenterology, pulmonology, endocrinology, allergy, vaccination
+      
+      Output format (one JSON per line):
+      {"context": "system question", "utterance": "user answer", "intent": "slot_answer", "slots": {"service_type": "extracted_value"}}
+    n: 120
+    few_shot_examples:
+      - '{"context": "What type of service are you looking for?", "utterance": "Cardiology", "intent": "slot_answer", "slots": {"service_type": "cardiology"}}'
+      - '{"context": "Which service would you like to book?", "utterance": "Umm, dental I think", "intent": "slot_answer", "slots": {"service_type": "dental"}}'
+      - '{"context": "What kind of appointment do you need?", "utterance": "Okay so I need something for my skin", "intent": "slot_answer", "slots": {"service_type": "dermatology"}}'
+      - '{"context": "Sure, what service can I help you with?", "utterance": "Yeah orthopedics", "intent": "slot_answer", "slots": {"service_type": "orthopedics"}}'
+      - '{"context": "And which department would you like?", "utterance": "I have been having chest pains", "intent": "slot_answer", "slots": {"service_type": "cardiology"}}'
+      - '{"context": "What type of specialist do you want to see?", "utterance": "Eye doctor", "intent": "slot_answer", "slots": {"service_type": "ophthalmology"}}'
+      - '{"context": "Which service should I book for you?", "utterance": "Well actually I need a general checkup", "intent": "slot_answer", "slots": {"service_type": "general checkup"}}'
+
+
+
+  - name: "Slot Answer — Date"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      THE PROBLEM: When the AI asks "What date would you like?" and the user replies 
+      "Tomorrow" or "Next Monday", the NLU model shouldn't try to classify this as an 
+      intent — it's a date slot answer to the AI's question.
+      
+      Generate realistic user utterances where the user is ANSWERING a question about 
+      what date they want for their appointment. The AI has just asked about the date.
+      
+      RULES:
+      - The context MUST be a system question asking about the date
+      - The utterance is the user's answer with a date value
+      - intent MUST be "slot_answer"
+      - slots MUST contain "date" with the date expression as spoken
+      - Include relative dates: tomorrow, next week, Monday, this Friday
+      - Include specific dates: March 15th, the 20th, April 3rd
+      - Include vague dates: "next week sometime", "as soon as possible", "this week"
+      - Include fillers: "Okay how about tomorrow", "Umm maybe Monday"
+      - Some should be bare single words: "Tomorrow", "Monday", "Wednesday"
+      
+      Output format (one JSON per line):
+      {"context": "system question", "utterance": "user answer", "intent": "slot_answer", "slots": {"date": "date_expression"}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "What date would you like your appointment?", "utterance": "Tomorrow", "intent": "slot_answer", "slots": {"date": "tomorrow"}}'
+      - '{"context": "Which day works best for you?", "utterance": "Umm, next Monday I think", "intent": "slot_answer", "slots": {"date": "next Monday"}}'
+      - '{"context": "When would you like to come in?", "utterance": "How about this Friday", "intent": "slot_answer", "slots": {"date": "this Friday"}}'
+      - '{"context": "And what date should I schedule that for?", "utterance": "March 15th please", "intent": "slot_answer", "slots": {"date": "March 15th"}}'
+      - '{"context": "Sure, which day?", "utterance": "Okay the day after tomorrow works", "intent": "slot_answer", "slots": {"date": "day after tomorrow"}}'
+      - '{"context": "What day were you thinking?", "utterance": "Wednesday", "intent": "slot_answer", "slots": {"date": "Wednesday"}}'
+
+  - name: "Slot Answer — Time"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      THE PROBLEM: When the AI asks "What time would you prefer?" and the user says 
+      "3pm" or "Morning", the model must recognize this as a time slot answer, not 
+      try to classify "3pm" as an intent.
+      
+      Generate realistic user utterances where the user is ANSWERING a question about 
+      what time they want their appointment. The AI has just asked about the time.
+      
+      RULES:
+      - The context MUST be a system question asking about the time
+      - The utterance is the user's answer with a time value
+      - intent MUST be "slot_answer"
+      - slots MUST contain "time" with the time expression as spoken
+      - Include specific times: 3pm, 10:30 am, 2 o'clock, half past four
+      - Include vague times: morning, afternoon, evening, after lunch
+      - Include fillers: "Okay 3pm works", "Hmm maybe around 2"
+      - Some should be bare: "3pm", "Morning", "10:30"
+      
+      Output format (one JSON per line):
+      {"context": "system question", "utterance": "user answer", "intent": "slot_answer", "slots": {"time": "time_expression"}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "What time would you prefer?", "utterance": "3pm", "intent": "slot_answer", "slots": {"time": "3pm"}}'
+      - '{"context": "What time works best for you?", "utterance": "Umm around 10 in the morning", "intent": "slot_answer", "slots": {"time": "10 in the morning"}}'
+      - '{"context": "And what time should I book that for?", "utterance": "Afternoon please, maybe 2:30", "intent": "slot_answer", "slots": {"time": "2:30 pm"}}'
+      - '{"context": "Sure, any preferred time?", "utterance": "Okay how about 4 o clock", "intent": "slot_answer", "slots": {"time": "4 o clock"}}'
+      - '{"context": "What time on Monday?", "utterance": "Morning", "intent": "slot_answer", "slots": {"time": "morning"}}'
+
+
+  - name: "Slot Answer — Patient Name"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      THE PROBLEM: When the AI asks "May I have your name?" and the user says 
+      "John Smith" or "It's Maria", the model must recognize this as a name slot 
+      answer. Names are tricky because they are proper nouns that can be confused 
+      with other entity types.
+      
+      Generate realistic user utterances where the user is ANSWERING a question about 
+      their name. The AI has just asked for the patient's name.
+      
+      RULES:
+      - The context MUST be a system question asking for the patient's name
+      - The utterance is the user's answer with their name
+      - intent MUST be "slot_answer"
+      - slots MUST contain "patient_name" with the name
+      - Use diverse names from different cultures: Indian, Western, East Asian, 
+        Middle Eastern, Hispanic, African names
+      - Include formats: "John Smith", "It's John", "My name is John Smith", 
+        "John", "Smith, John" (last-first), just first name
+      - Include filler: "Uh yeah its John Smith", "Okay my name is Maria"
+      - Some should be bare names: "John Smith", "Priya", "Ahmed"
+      
+      Output format (one JSON per line):
+      {"context": "system question", "utterance": "user answer", "intent": "slot_answer", "slots": {"patient_name": "name_value"}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "May I have your name please?", "utterance": "John Smith", "intent": "slot_answer", "slots": {"patient_name": "John Smith"}}'
+      - '{"context": "Could you tell me your name?", "utterance": "Uh yeah it is Priya Sharma", "intent": "slot_answer", "slots": {"patient_name": "Priya Sharma"}}'
+      - '{"context": "And your name is?", "utterance": "My name is Ahmed Hassan", "intent": "slot_answer", "slots": {"patient_name": "Ahmed Hassan"}}'
+      - '{"context": "Sure, who is the appointment for?", "utterance": "Maria", "intent": "slot_answer", "slots": {"patient_name": "Maria"}}'
+      - '{"context": "Can I get the patient name?", "utterance": "Okay its Wei Chen", "intent": "slot_answer", "slots": {"patient_name": "Wei Chen"}}'
+
+
+  - name: "Slot Answer — Doctor Name"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate realistic user utterances where the user is ANSWERING a question about 
+      which doctor they want to see. The AI has just asked about doctor preference.
+      
+      RULES:
+      - The context MUST be a system question asking about doctor preference
+      - The utterance is the user's answer with a doctor name
+      - intent MUST be "slot_answer"
+      - slots MUST contain "doctor_name"
+      - Use "Dr." prefix sometimes, sometimes not
+      - Include diverse doctor names
+      - Include fillers and hesitations
+      - Some bare: "Dr. Patel", "Wilson", "Dr. Sarah"
+      
+      Output format (one JSON per line):
+      {"context": "system question", "utterance": "user answer", "intent": "slot_answer", "slots": {"doctor_name": "doctor_value"}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "Do you have a preferred doctor?", "utterance": "Dr. Patel", "intent": "slot_answer", "slots": {"doctor_name": "Dr. Patel"}}'
+      - '{"context": "Which doctor would you like to see?", "utterance": "Umm I usually see Dr. Sarah Wilson", "intent": "slot_answer", "slots": {"doctor_name": "Dr. Sarah Wilson"}}'
+      - '{"context": "Any preferred doctor?", "utterance": "No preference", "intent": "denial", "slots": {}}'
+      - '{"context": "Who is your doctor?", "utterance": "Gupta", "intent": "slot_answer", "slots": {"doctor_name": "Gupta"}}'
+      - '{"context": "Which doctor do you want?", "utterance": "I think her name is Dr. Lee", "intent": "slot_answer", "slots": {"doctor_name": "Dr. Lee"}}'
+
+
+
+  - name: "Slot Answer — Phone Number"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate realistic user utterances where the user is ANSWERING a question about 
+      their phone number. The AI has just asked for a contact number.
+      
+      RULES:
+      - The context MUST be a system question asking for a phone number
+      - The utterance is the user's answer with a phone number
+      - intent MUST be "slot_answer"
+      - slots MUST contain "phone"
+      - Include various formats: 555-123-4567, 5551234567, (555) 123-4567
+      - Include Indian formats: 98765 43210, +91 98765 43210
+      - Include fillers: "Yeah its 555-123-4567", "Okay my number is..."
+      - Some bare: just the number
+      
+      Output format (one JSON per line):
+      {"context": "system question", "utterance": "user answer", "intent": "slot_answer", "slots": {"phone": "phone_value"}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "Could I get a phone number to reach you at?", "utterance": "555-123-4567", "intent": "slot_answer", "slots": {"phone": "555-123-4567"}}'
+      - '{"context": "What is the best number to contact you?", "utterance": "Yeah its 98765 43210", "intent": "slot_answer", "slots": {"phone": "98765 43210"}}'
+      - '{"context": "And your phone number?", "utterance": "Okay my number is 9876543210", "intent": "slot_answer", "slots": {"phone": "9876543210"}}'
+
+
+
+  # ================================================================
+  # CONFIRMATION — Context-dependent "yes" / "okay" / "sure"
+  # ================================================================
+  # This is the #2 hardest category. "Okay" is confirmation ONLY when
+  # the system asked a yes/no question. NOT when it asked for a slot.
+  # ================================================================
+
+  - name: "Confirmation"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      THE CRITICAL AMBIGUITY PROBLEM:
+      The word "Okay" means COMPLETELY different things depending on context:
+        - System: "Is Thursday at 3pm fine?" → User: "Okay" → This IS confirmation
+        - System: "What service do you need?" → User: "Okay cardiology" → This is NOT confirmation, it's a slot answer
+        - System: "I've booked your appointment" → User: "Okay thanks" → This is goodbye/acknowledgment
+      
+      Generate utterances where the user IS genuinely CONFIRMING something the system 
+      proposed or asked in a yes/no format. The system context must be a confirmable 
+      question or statement.
+      
+      RULES:
+      - Context MUST be a yes/no question or a proposal to confirm
+        Examples: "Is Thursday okay?", "Shall I book cardiology at 3pm?",
+        "So that's a dental appointment for Monday — correct?",
+        "I have John Smith, tomorrow at 2pm for cardiology. Should I confirm?"
+      - Utterance is the user confirming: "Yes", "Yeah", "Okay", "That's right",
+        "Sure", "Correct", "Yep", "Perfect", "Go ahead", "That works"
+      - intent MUST be "confirmation"
+      - slots should be empty {} (the user is just confirming, not providing new data)
+      - Include casual: "Yep sounds good", "Yeah that's fine", "Mhm okay"
+      - Include formal: "Yes that is correct", "Please go ahead and confirm"
+      - Include very short: "Yes", "Yeah", "Okay", "Sure", "Yep"
+      
+      Output format (one JSON per line):
+      {"context": "system yes/no question", "utterance": "user confirmation", "intent": "confirmation", "slots": {}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "Is Thursday at 3pm fine for you?", "utterance": "Okay", "intent": "confirmation", "slots": {}}'
+      - '{"context": "So I have a cardiology appointment for John Smith on Monday at 10am. Shall I confirm?", "utterance": "Yes please", "intent": "confirmation", "slots": {}}'
+      - '{"context": "Would you like me to book that for tomorrow?", "utterance": "Yeah that works", "intent": "confirmation", "slots": {}}'
+      - '{"context": "Your appointment is scheduled for Friday at 2pm. Is that correct?", "utterance": "Yep", "intent": "confirmation", "slots": {}}'
+      - '{"context": "Shall I go ahead and cancel your appointment?", "utterance": "Sure go ahead", "intent": "confirmation", "slots": {}}'
+      - '{"context": "Is Dr. Patel okay for you?", "utterance": "Mhm yes", "intent": "confirmation", "slots": {}}'
+
+
+
+
+  # ================================================================
+  # DENIAL — "no" with or without corrections
+  # ================================================================
+
+  - name: "Denial"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user is DENYING or DISAGREEING with something the 
+      system said. The system context must be a proposal or question the user rejects.
+      
+      IMPORTANT: Some denials include corrections with new slot values!
+        - "No, make it Friday" → denial + date slot
+        - "No not cardiology, I need dermatology" → denial + service_type slot
+        - "No" → pure denial, no slots
+      
+      RULES:
+      - Context MUST be a confirmable statement the user disagrees with
+      - intent MUST be "denial"
+      - slots should contain any NEW values the user provides as corrections
+      - Include pure denials: "No", "Nope", "That's wrong", "Not quite"
+      - Include denials with corrections: "No, make it Tuesday", "No, I said Dr. Patel"
+      - Include polite denials: "Actually no, I'd prefer...", "Not that one..."
+      
+      Output format (one JSON per line):
+      {"context": "system proposal", "utterance": "user denial", "intent": "denial", "slots": {corrections_if_any}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "Is Thursday at 3pm fine for you?", "utterance": "No", "intent": "denial", "slots": {}}'
+      - '{"context": "Shall I book cardiology for you?", "utterance": "No not cardiology, I need dermatology", "intent": "denial", "slots": {"service_type": "dermatology"}}'
+      - '{"context": "So your appointment is for Monday?", "utterance": "No, make it Friday", "intent": "denial", "slots": {"date": "Friday"}}'
+      - '{"context": "I have you down for 3pm, correct?", "utterance": "Actually no, I said 5pm", "intent": "denial", "slots": {"time": "5pm"}}'
+      - '{"context": "Is the appointment for Dr. Wilson?", "utterance": "Nope, Dr. Patel please", "intent": "denial", "slots": {"doctor_name": "Dr. Patel"}}'
+      - '{"context": "Would you like me to cancel your appointment?", "utterance": "No no don t cancel it", "intent": "denial", "slots": {}}'
+
+
+
+
+  # ================================================================
+  # BOOK APPOINTMENT
+  # ================================================================
+
+  - name: "Book Appointment"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate realistic user utterances where the user wants to BOOK A NEW APPOINTMENT.
+      These utterances come at different stages of conversation.
+      
+      RULES:
+      - Context varies: first turn (empty/greeting context), mid-conversation, etc.
+      - intent MUST be "book_appointment"
+      - Extract ALL slots mentioned: service_type, date, time, patient_name, doctor_name
+      - Some utterances have ALL slots: "Book cardiology for John tomorrow at 3pm"
+      - Some have PARTIAL slots: "I want to book an appointment"
+      - Some are embedded: "Hi, I was wondering if I could see a doctor"
+      - Include filler words naturally: "Okay so I want to...", "Yeah I need..."
+      - Include various phrasings: "book", "schedule", "make", "set up", "get", "arrange"
+      - IMPORTANT: Include "okay" as filler, NOT as confirmation:
+        "Okay I want to book an appointment" → intent is book_appointment, not confirmation
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "book_appointment", "slots": {extracted_slots}}
+    n: 120
+    few_shot_examples:
+      - '{"context": "How can I help you today?", "utterance": "I want to book an appointment", "intent": "book_appointment", "slots": {}}'
+      - '{"context": "Welcome, how can I assist you?", "utterance": "Okay so I need to schedule a cardiology appointment for tomorrow at 3pm", "intent": "book_appointment", "slots": {"service_type": "cardiology", "date": "tomorrow", "time": "3pm"}}'
+      - '{"context": "", "utterance": "Hi I would like to see a dentist", "intent": "book_appointment", "slots": {"service_type": "dental"}}'
+      - '{"context": "Good morning, what can I do for you?", "utterance": "Yeah I need a checkup with Dr. Patel on Monday", "intent": "book_appointment", "slots": {"service_type": "general checkup", "doctor_name": "Dr. Patel", "date": "Monday"}}'
+      - '{"context": "What can I help you with?", "utterance": "Okay so my name is John Smith and I want to book a dermatology appointment for next Tuesday at 10am", "intent": "book_appointment", "slots": {"patient_name": "John Smith", "service_type": "dermatology", "date": "next Tuesday", "time": "10am"}}'
+      - '{"context": "", "utterance": "Hi yeah um I was wondering if I could get an appointment", "intent": "book_appointment", "slots": {}}'
+
+  # ================================================================
+  # CANCEL APPOINTMENT
+  # ================================================================
+
+  - name: "Cancel Appointment"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate realistic user utterances where the user wants to CANCEL an existing appointment.
+      
+      RULES:
+      - Context varies: first turn, mid-conversation, redirected from another intent
+      - intent MUST be "cancel_appointment"
+      - Possible slots: patient_name, date, time (referencing the existing appointment)
+      - Include phrasings: "cancel", "call off", "remove", "delete", "drop", "won't be coming"
+      - Include casual: "Yeah I need to cancel", "Okay cancel my appointment"
+      - Include with reasons: "I can't make it tomorrow, please cancel"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "cancel_appointment", "slots": {extracted_slots}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "How can I help you?", "utterance": "I need to cancel my appointment", "intent": "cancel_appointment", "slots": {}}'
+      - '{"context": "Welcome, what can I do for you?", "utterance": "Yeah I want to cancel my appointment for tomorrow, my name is John Smith", "intent": "cancel_appointment", "slots": {"patient_name": "John Smith", "date": "tomorrow"}}'
+      - '{"context": "Is there anything else I can help with?", "utterance": "Actually I also need to cancel another appointment", "intent": "cancel_appointment", "slots": {}}'
+      - '{"context": "", "utterance": "Hi I won t be able to make it on Monday, please cancel", "intent": "cancel_appointment", "slots": {"date": "Monday"}}'
+
+
+
+  # ================================================================
+  # RESCHEDULE APPOINTMENT
+  # ================================================================
+
+  - name: "Reschedule Appointment"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate realistic user utterances where the user wants to RESCHEDULE an existing 
+      appointment to a different date and/or time.
+      
+      RULES:
+      - intent MUST be "reschedule_appointment"
+      - Slots: date (new date), time (new time), patient_name
+      - Include phrasings: "reschedule", "move", "change the date", "push back", "shift"
+      - Some include the new date/time: "Move it to Friday at 2pm"
+      - Some don't: "I need to reschedule my appointment"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "reschedule_appointment", "slots": {extracted_slots}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "How can I help you?", "utterance": "I need to reschedule my appointment", "intent": "reschedule_appointment", "slots": {}}'
+      - '{"context": "Sure, what do you need?", "utterance": "Can you move my appointment to next Friday at 10am", "intent": "reschedule_appointment", "slots": {"date": "next Friday", "time": "10am"}}'
+      - '{"context": "", "utterance": "Yeah I want to push back my Tuesday appointment to Thursday", "intent": "reschedule_appointment", "slots": {"date": "Thursday"}}'
+
+
+
+  # ================================================================
+  # CONFIRM APPOINTMENT
+  # ================================================================
+
+  - name: "Confirm Appointment"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user is explicitly asking to CONFIRM a booked 
+      appointment (different from general "confirmation" which is just saying yes).
+      This is proactive: the user is asking the clinic to confirm their booking exists.
+      
+      RULES:
+      - intent MUST be "confirm_appointment"
+      - This is about confirming a BOOKING, not saying "yes" to a question
+      - Include: "I want to confirm my appointment", "Please confirm my booking"
+      - Possible slots: patient_name, date
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "confirm_appointment", "slots": {extracted_slots}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "How can I help you?", "utterance": "I want to confirm my appointment for tomorrow", "intent": "confirm_appointment", "slots": {"date": "tomorrow"}}'
+      - '{"context": "What can I do for you?", "utterance": "Yeah I am calling to confirm my booking", "intent": "confirm_appointment", "slots": {}}'
+      - '{"context": "", "utterance": "Hi I just want to make sure my appointment is still on for Monday", "intent": "confirm_appointment", "slots": {"date": "Monday"}}'
+
+
+
+  # ================================================================
+  # CHECK APPOINTMENT STATUS
+  # ================================================================
+
+  - name: "Check Appointment Status"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user is checking the STATUS of a specific appointment 
+      (is it confirmed? any changes? is the doctor available?).
+      
+      RULES:
+      - intent MUST be "check_appointment_status"
+      - Possible slots: patient_name, date
+      - Include: "What's the status of my appointment?", "Is my booking still confirmed?"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "check_appointment_status", "slots": {extracted_slots}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "How can I help you?", "utterance": "I want to check the status of my appointment", "intent": "check_appointment_status", "slots": {}}'
+      - '{"context": "", "utterance": "Hi my name is Priya and I want to know if my appointment is still on", "intent": "check_appointment_status", "slots": {"patient_name": "Priya"}}'
+      - '{"context": "Sure, what do you need?", "utterance": "Has there been any change to my Monday appointment", "intent": "check_appointment_status", "slots": {"date": "Monday"}}'
+
+  # ================================================================
+  # CHECK MY APPOINTMENTS
+  # ================================================================
+
+  - name: "Check My Appointments"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user wants to LIST or VIEW all their upcoming 
+      appointments (not status of one specific appointment).
+      
+      RULES:
+      - intent MUST be "check_my_appointments"
+      - Possible slots: patient_name
+      - Include: "What appointments do I have?", "List my upcoming visits"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "check_my_appointments", "slots": {extracted_slots}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "How can I help you?", "utterance": "I want to check my upcoming appointments", "intent": "check_my_appointments", "slots": {}}'
+      - '{"context": "", "utterance": "Hi can you list all my appointments, name is John Smith", "intent": "check_my_appointments", "slots": {"patient_name": "John Smith"}}'
+      - '{"context": "Anything else?", "utterance": "Yeah what appointments do I have next week", "intent": "check_my_appointments", "slots": {}}'
+
+
+
+  # ================================================================
+  # CHANGE DATE / TIME / DOCTOR / SERVICE
+  # ================================================================
+
+  - name: "Change Date"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user wants to CHANGE ONLY THE DATE of their 
+      appointment (not a full reschedule — just the date).
+      This typically happens MID-CONVERSATION when they are correcting or modifying.
+      
+      RULES:
+      - Context should be mid-booking or after the system mentioned a date
+      - intent MUST be "change_date"
+      - slots MUST contain "date" with the new date
+      - Include: "Make it Tuesday instead", "Can we do next week?", "Change to Friday"
+      - Include filler: "Actually change the date to Monday"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "change_date", "slots": {"date": "new_date"}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "I have you for Thursday at 3pm. Is that correct?", "utterance": "Actually can we do Friday instead", "intent": "change_date", "slots": {"date": "Friday"}}'
+      - '{"context": "Your appointment is set for Monday.", "utterance": "Change it to Wednesday", "intent": "change_date", "slots": {"date": "Wednesday"}}'
+      - '{"context": "So the date is March 15th?", "utterance": "No make it the 20th", "intent": "change_date", "slots": {"date": "the 20th"}}'
+      - '{"context": "Tomorrow at 2pm, does that work?", "utterance": "Hmm can we push it to next week", "intent": "change_date", "slots": {"date": "next week"}}'
+
+  - name: "Change Time"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user wants to CHANGE ONLY THE TIME of their 
+      appointment. This happens mid-conversation.
+      
+      RULES:
+      - Context should be mid-booking or after the system mentioned a time
+      - intent MUST be "change_time"
+      - slots MUST contain "time" with the new time
+      - Include: "Make it 5pm instead", "Can we do afternoon?", "Change to 10:30"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "change_time", "slots": {"time": "new_time"}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "Your appointment is at 3pm. Does that work?", "utterance": "Can we make it 5pm instead", "intent": "change_time", "slots": {"time": "5pm"}}'
+      - '{"context": "I have 10am for you.", "utterance": "No I need afternoon, like 2pm", "intent": "change_time", "slots": {"time": "2pm"}}'
+      - '{"context": "The time is set for 9:30am.", "utterance": "Change it to 11am please", "intent": "change_time", "slots": {"time": "11am"}}'
+
+  - name: "Change Doctor"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user wants to CHANGE THE DOCTOR for their appointment.
+      
+      RULES:
+      - Context should reference a doctor or be mid-booking
+      - intent MUST be "change_doctor"
+      - slots MUST contain "doctor_name" with the new doctor
+      - Include: "I'd rather see Dr. Patel", "Switch to Dr. Wilson", "Change the doctor"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "change_doctor", "slots": {"doctor_name": "new_doctor"}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "Your appointment is with Dr. Wilson.", "utterance": "Can I switch to Dr. Patel instead", "intent": "change_doctor", "slots": {"doctor_name": "Dr. Patel"}}'
+      - '{"context": "I have Dr. Kumar for your cardiology appointment.", "utterance": "Actually I d prefer Dr. Shah", "intent": "change_doctor", "slots": {"doctor_name": "Dr. Shah"}}'
+      - '{"context": "The available doctor is Dr. Lee.", "utterance": "Is Dr. Gupta available instead", "intent": "change_doctor", "slots": {"doctor_name": "Dr. Gupta"}}'
+
+  - name: "Change Service"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user wants to CHANGE THE SERVICE TYPE of their appointment.
+      
+      RULES:
+      - Context should reference a service or be mid-booking
+      - intent MUST be "change_service"
+      - slots MUST contain "service_type" with the new service
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "change_service", "slots": {"service_type": "new_service"}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "I have you for a cardiology appointment.", "utterance": "Actually I need dermatology instead", "intent": "change_service", "slots": {"service_type": "dermatology"}}'
+      - '{"context": "Your dental appointment is scheduled.", "utterance": "Wait can we change that to a general checkup", "intent": "change_service", "slots": {"service_type": "general checkup"}}'
+      - '{"context": "So the service is ophthalmology?", "utterance": "No I meant ENT", "intent": "change_service", "slots": {"service_type": "ENT"}}'
+
+
+
+
+  # ================================================================
+  # PATIENT MANAGEMENT
+  # ================================================================
+
+  - name: "Register New Patient"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user wants to REGISTER as a new patient at the clinic.
+      
+      RULES:
+      - intent MUST be "register_new_patient"
+      - Possible slots: patient_name, phone
+      - Include: "I'm a new patient", "I want to register", "First time here"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "register_new_patient", "slots": {extracted_slots}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "How can I help you?", "utterance": "I am a new patient and I want to register", "intent": "register_new_patient", "slots": {}}'
+      - '{"context": "Welcome, is this your first visit?", "utterance": "Yes this is my first time, my name is Sarah Lee", "intent": "register_new_patient", "slots": {"patient_name": "Sarah Lee"}}'
+      - '{"context": "", "utterance": "Hi I want to register as a new patient, name is Ahmed and my number is 9876543210", "intent": "register_new_patient", "slots": {"patient_name": "Ahmed", "phone": "9876543210"}}'
+
+  - name: "Update Contact Info"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user wants to UPDATE their contact information 
+      (phone number, address, email, etc.).
+      
+      RULES:
+      - intent MUST be "update_contact_info"
+      - Possible slots: patient_name, phone
+      - Include: "I changed my number", "Update my phone", "New contact details"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "update_contact_info", "slots": {extracted_slots}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "How can I help you?", "utterance": "I need to update my phone number", "intent": "update_contact_info", "slots": {}}'
+      - '{"context": "Sure, what do you need?", "utterance": "My name is John and my new number is 555-999-0000", "intent": "update_contact_info", "slots": {"patient_name": "John", "phone": "555-999-0000"}}'
+
+  - name: "Verify Patient Identity"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user is trying to VERIFY their identity or the 
+      system is asking them to confirm who they are.
+      
+      RULES:
+      - intent MUST be "verify_patient_identity"
+      - Possible slots: patient_name, phone
+      - Include: "I want to verify my identity", "Let me confirm who I am"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "verify_patient_identity", "slots": {extracted_slots}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "Can you verify your identity please?", "utterance": "Yes my name is Priya Sharma", "intent": "verify_patient_identity", "slots": {"patient_name": "Priya Sharma"}}'
+      - '{"context": "For security, can you confirm your name and phone?", "utterance": "John Smith, number is 555-123-4567", "intent": "verify_patient_identity", "slots": {"patient_name": "John Smith", "phone": "555-123-4567"}}'
+
+      
+
+  # ================================================================
+
+  # FAQ / INFORMATIONAL INTENTS
+
+  # ================================================================
+
+
+
+  - name: "Clinic Hours"
+
+    instruction: |
+
+      You are generating training data for an AI clinic receptionist's NLU model.
+
+      
+
+      Generate utterances where the user is asking about CLINIC OPERATING HOURS.
+
+      
+
+      RULES:
+
+      - intent MUST be "clinic_hours"
+
+      - slots should be empty {} (informational, no booking data)
+
+      - Include: "What are your hours?", "When do you open?", "Are you open on Sunday?"
+
+      - Include casual: "Hey what time do you guys close", "Are you open now"
+
+      - Context can be first turn, mid-conversation, or after another task
+
+      
+
+      Output format (one JSON per line):
+
+      {"context": "system context", "utterance": "user utterance", "intent": "clinic_hours", "slots": {}}
+
+    n: 100
+
+    few_shot_examples:
+
+      - '{"context": "", "utterance": "What are your clinic hours", "intent": "clinic_hours", "slots": {}}'
+
+      - '{"context": "How can I help you?", "utterance": "What time do you open and close", "intent": "clinic_hours", "slots": {}}'
+
+      - '{"context": "Is there anything else?", "utterance": "Yeah are you guys open on weekends", "intent": "clinic_hours", "slots": {}}'
+
+
+
+  - name: "Clinic Location"
+
+    instruction: |
+
+      You are generating training data for an AI clinic receptionist's NLU model.
+
+      
+
+      Generate utterances where the user is asking about CLINIC LOCATION or ADDRESS.
+
+      
+
+      RULES:
+
+      - intent MUST be "clinic_location"
+
+      - slots should be empty {}
+
+      - Include: "Where are you located?", "What's your address?", "How do I get there?"
+
+      
+
+      Output format (one JSON per line):
+
+      {"context": "system context", "utterance": "user utterance", "intent": "clinic_location", "slots": {}}
+
+    n: 100
+
+    few_shot_examples:
+
+      - '{"context": "", "utterance": "Where is the clinic located", "intent": "clinic_location", "slots": {}}'
+
+      - '{"context": "How can I help you?", "utterance": "What is your address", "intent": "clinic_location", "slots": {}}'
+
+      - '{"context": "Your appointment is confirmed.", "utterance": "Great, how do I get there", "intent": "clinic_location", "slots": {}}'
+
+
+
+  - name: "Consultation Fee"
+
+    instruction: |
+
+      You are generating training data for an AI clinic receptionist's NLU model.
+
+      
+
+      Generate utterances where the user is asking about COSTS, FEES, or PRICING for 
+
+      consultations or services.
+
+      
+
+      RULES:
+
+      - intent MUST be "consultation_fee"
+
+      - Possible slots: service_type (if they ask about a specific service's cost)
+
+      - Include: "How much does it cost?", "What's the consultation fee?", "Is it expensive?"
+
+      
+
+      Output format (one JSON per line):
+
+      {"context": "system context", "utterance": "user utterance", "intent": "consultation_fee", "slots": {extracted_slots}}
+
+    n: 100
+
+    few_shot_examples:
+
+      - '{"context": "How can I help you?", "utterance": "How much does a consultation cost", "intent": "consultation_fee", "slots": {}}'
+
+      - '{"context": "", "utterance": "What is the fee for cardiology", "intent": "consultation_fee", "slots": {"service_type": "cardiology"}}'
+
+      - '{"context": "Would you like to book?", "utterance": "First tell me how much it costs", "intent": "consultation_fee", "slots": {}}'
+
+
+
+  - name: "Doctor Specialization"
+
+    instruction: |
+
+      You are generating training data for an AI clinic receptionist's NLU model.
+
+      
+
+      Generate utterances where the user is asking about a DOCTOR'S SPECIALIZATION 
+
+      or expertise. Not about availability — about what they specialize in.
+
+      
+
+      RULES:
+
+      - intent MUST be "doctor_specialization"
+
+      - Possible slots: doctor_name
+
+      - Include: "What does Dr. Patel specialize in?", "Is Dr. Lee a cardiologist?"
+
+      
+
+      Output format (one JSON per line):
+
+      {"context": "system context", "utterance": "user utterance", "intent": "doctor_specialization", "slots": {extracted_slots}}
+
+    n: 100
+
+    few_shot_examples:
+
+      - '{"context": "How can I help you?", "utterance": "What does Dr. Patel specialize in", "intent": "doctor_specialization", "slots": {"doctor_name": "Dr. Patel"}}'
+
+      - '{"context": "", "utterance": "Is there a neurologist at your clinic", "intent": "doctor_specialization", "slots": {}}'
+
+
+
+  - name: "Doctor Availability"
+
+    instruction: |
+
+      You are generating training data for an AI clinic receptionist's NLU model.
+
+      
+
+      Generate utterances where the user is asking about a DOCTOR'S AVAILABILITY 
+
+      or schedule. Not specialization — when they're free.
+
+      
+
+      RULES:
+
+      - intent MUST be "doctor_availability"
+
+      - Possible slots: doctor_name, date
+
+      - Include: "Is Dr. Patel available tomorrow?", "When is Dr. Lee free?"
+
+      
+
+      Output format (one JSON per line):
+
+      {"context": "system context", "utterance": "user utterance", "intent": "doctor_availability", "slots": {extracted_slots}}
+
+    n: 100
+
+    few_shot_examples:
+
+      - '{"context": "Which doctor would you like?", "utterance": "Is Dr. Patel available tomorrow", "intent": "doctor_availability", "slots": {"doctor_name": "Dr. Patel", "date": "tomorrow"}}'
+
+      - '{"context": "", "utterance": "When is Dr. Shah free this week", "intent": "doctor_availability", "slots": {"doctor_name": "Dr. Shah"}}'
+
+
+
+  - name: "Services Available"
+
+    instruction: |
+
+      You are generating training data for an AI clinic receptionist's NLU model.
+
+      
+
+      Generate utterances where the user is asking what SERVICES the clinic offers.
+
+      
+
+      RULES:
+
+      - intent MUST be "services_available"
+
+      - slots should be empty {}
+
+      - Include: "What services do you offer?", "What kind of treatments available?"
+
+      
+
+      Output format (one JSON per line):
+
+      {"context": "system context", "utterance": "user utterance", "intent": "services_available", "slots": {}}
+
+    n: 100
+
+    few_shot_examples:
+
+      - '{"context": "How can I help you?", "utterance": "What services does your clinic offer", "intent": "services_available", "slots": {}}'
+
+      - '{"context": "", "utterance": "Do you have physiotherapy", "intent": "services_available", "slots": {}}'
+
+
+  # ================================================================
+  # CONVERSATIONAL INTENTS
+  # ================================================================
+
+  - name: "Greeting"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate GREETING utterances. These happen at the start of conversations.
+      
+      IMPORTANT DISAMBIGUATION:
+      - "Okay I want to book" is NOT a greeting — it's book_appointment
+      - "Hello" alone IS a greeting
+      - "Hi, I need an appointment" → intent is book_appointment, NOT greeting
+        (the greeting is just a prefix, the intent is the booking)
+      - ONLY pure greetings with no other intent should be labeled as greeting
+      
+      RULES:
+      - intent MUST be "greeting"
+      - slots should be empty {}
+      - Context should be empty or a system greeting
+      - Include: "Hello", "Hi there", "Good morning", "Hey", "Hi I am a patient"
+      - EXCLUDE anything that embeds another intent (those belong to the other intent)
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "greeting", "slots": {}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "", "utterance": "Hello", "intent": "greeting", "slots": {}}'
+      - '{"context": "", "utterance": "Hi there", "intent": "greeting", "slots": {}}'
+      - '{"context": "", "utterance": "Good morning", "intent": "greeting", "slots": {}}'
+      - '{"context": "", "utterance": "Hey is this the clinic", "intent": "greeting", "slots": {}}'
+      - '{"context": "Welcome to the clinic. How can I help you?", "utterance": "Hi yes hello", "intent": "greeting", "slots": {}}'
+
+  - name: "Goodbye"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate GOODBYE utterances. These happen at the end of conversations.
+      
+      RULES:
+      - intent MUST be "goodbye"
+      - slots should be empty {}
+      - Context is usually after a completed action or "anything else?" question
+      - Include: "Bye", "Thank you goodbye", "That's all", "Nothing else thanks"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "goodbye", "slots": {}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "Is there anything else I can help with?", "utterance": "No that is all, thank you", "intent": "goodbye", "slots": {}}'
+      - '{"context": "Your appointment is confirmed.", "utterance": "Great thanks bye", "intent": "goodbye", "slots": {}}'
+      - '{"context": "Anything else?", "utterance": "Nope goodbye", "intent": "goodbye", "slots": {}}'
+      - '{"context": "", "utterance": "Okay thanks have a good day", "intent": "goodbye", "slots": {}}'
+
+  - name: "Help"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user is asking for HELP or wants to know what 
+      services/options are available to them.
+      
+      RULES:
+      - intent MUST be "help"
+      - slots should be empty {}
+      - Include: "What can you help me with?", "What are my options?", "Help"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "help", "slots": {}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "How can I help you?", "utterance": "What can you do", "intent": "help", "slots": {}}'
+      - '{"context": "", "utterance": "Help", "intent": "help", "slots": {}}'
+      - '{"context": "Welcome!", "utterance": "What are my options here", "intent": "help", "slots": {}}'
+
+  - name: "Repeat"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user is asking the AI to REPEAT what it just said.
+      
+      RULES:
+      - intent MUST be "repeat"
+      - slots should be empty {}
+      - Context should be something the AI said that the user didn't hear
+      - Include: "Can you repeat that?", "What did you say?", "I didn't catch that",
+        "Sorry?", "Come again?", "One more time"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "repeat", "slots": {}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "Your appointment is for Thursday at 3pm with Dr. Patel in cardiology.", "utterance": "Sorry can you repeat that", "intent": "repeat", "slots": {}}'
+      - '{"context": "The clinic is located at 123 Main Street.", "utterance": "What was that again", "intent": "repeat", "slots": {}}'
+      - '{"context": "I have you down for Monday at 10am.", "utterance": "I didn t catch that could you say it again", "intent": "repeat", "slots": {}}'
+
+
+  # ================================================================
+  # ESCALATION INTENTS
+  # ================================================================
+
+  - name: "Complaint"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user is COMPLAINING about the service, wait times, 
+      treatment, staff behavior, or any aspect of the clinic experience.
+      
+      RULES:
+      - intent MUST be "complaint"
+      - slots should be empty {}
+      - Include various complaint types: rude staff, long wait, wrong treatment,
+        billing issues, cleanliness, cancellation without notice
+      - Include emotional language: frustrated, angry, upset, disappointed
+      - Context can be first turn or mid-conversation
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "complaint", "slots": {}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "How can I help you?", "utterance": "I want to file a complaint, the doctor was very rude", "intent": "complaint", "slots": {}}'
+      - '{"context": "", "utterance": "I am very unhappy with the service I received last time", "intent": "complaint", "slots": {}}'
+      - '{"context": "Is there anything else?", "utterance": "Actually yes, I waited 2 hours last time and nobody told me anything", "intent": "complaint", "slots": {}}'
+
+  - name: "Transfer to Human"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user wants to SPEAK TO A REAL HUMAN agent 
+      instead of the AI receptionist.
+      
+      RULES:
+      - intent MUST be "transfer_to_human"
+      - slots should be empty {}
+      - Include: "Let me talk to a person", "Transfer me to a human",
+        "I want to speak to someone real", "Can I talk to the receptionist"
+      - Include frustrated versions: "Stop, give me a human", "This isn't working"
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "transfer_to_human", "slots": {}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "How can I help you?", "utterance": "I want to speak to a real person", "intent": "transfer_to_human", "slots": {}}'
+      - '{"context": "I can help you book an appointment.", "utterance": "No just transfer me to someone", "intent": "transfer_to_human", "slots": {}}'
+      - '{"context": "What service do you need?", "utterance": "Can I just talk to the human receptionist please", "intent": "transfer_to_human", "slots": {}}'
+
+  - name: "Emergency Request"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances where the user is reporting an EMERGENCY or URGENT medical situation.
+      
+      RULES:
+      - intent MUST be "emergency_request"
+      - slots should be empty {}
+      - Include: "This is an emergency", "I need urgent help", "Someone is hurt",
+        "I'm having chest pain", "Please send help now"
+      - Include various emergency types: allergic reaction, chest pain, breathing difficulty,
+        bleeding, fall, seizure, severe pain
+      - Context can be any — emergencies can happen anytime
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "emergency_request", "slots": {}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "How can I help you?", "utterance": "This is an emergency, my father is having chest pain", "intent": "emergency_request", "slots": {}}'
+      - '{"context": "", "utterance": "Please help I need to see a doctor immediately it is urgent", "intent": "emergency_request", "slots": {}}'
+      - '{"context": "What service would you like?", "utterance": "Forget the appointment, I am having severe breathing difficulty right now", "intent": "emergency_request", "slots": {}}'
+
+
+
+  # ================================================================
+  # OUT OF DOMAIN
+  # ================================================================
+
+  - name: "Out of Domain"
+    instruction: |
+      You are generating training data for an AI clinic receptionist's NLU model.
+      
+      Generate utterances that are COMPLETELY UNRELATED to clinic/medical services.
+      These are off-topic, random, or irrelevant things a caller might say.
+      
+      RULES:
+      - intent MUST be "out_of_domain"
+      - slots should be empty {}
+      - Include: random facts, jokes, weather questions, food orders, tech support,
+        political questions, personal chat, wrong-number scenarios
+      - Context can be any
+      
+      Output format (one JSON per line):
+      {"context": "system context", "utterance": "user utterance", "intent": "out_of_domain", "slots": {}}
+    n: 100
+    few_shot_examples:
+      - '{"context": "How can I help you?", "utterance": "What is the weather like today", "intent": "out_of_domain", "slots": {}}'
+      - '{"context": "", "utterance": "Can you order me a pizza", "intent": "out_of_domain", "slots": {}}'
+      - '{"context": "What service do you need?", "utterance": "I was just wondering who won the cricket match", "intent": "out_of_domain", "slots": {}}'
+      - '{"context": "", "utterance": "Tell me a joke", "intent": "out_of_domain", "slots": {}}'
+      - '{"context": "How can I help you?", "utterance": "Is this the pharmacy? I think I called the wrong number", "intent": "out_of_domain", "slots": {}}'

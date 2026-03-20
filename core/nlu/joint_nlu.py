@@ -44,15 +44,10 @@ class JointNLU:
         context_enc = self.tokenizer(context, add_special_tokens=False)
         context_ids = context_enc["input_ids"]
         
-        # Tokenize utterance (is_split_into_words=False for raw inference)
-        utterance_enc = self.tokenizer(utterance, add_special_tokens=False)
-        utterance_ids = utterance_enc["input_ids"]
-        word_ids = utterance_enc.word_ids() # Used for mapping back to characters
-        offset_mapping = utterance_enc.offset_mapping # Need offsets for exact string match
-        
-        # Actually need offsets to get raw strings. Let's re-tokenize with return_offsets_mapping=True for ONLY the utterance
+        # Tokenize utterance with offsets to map tokens back to characters
         utterance_enc = self.tokenizer(utterance, add_special_tokens=False, return_offsets_mapping=True)
         utterance_ids = utterance_enc["input_ids"]
+        word_ids = utterance_enc.word_ids()
         offsets = utterance_enc["offset_mapping"]
 
         sys_token_id = self.tokenizer.convert_tokens_to_ids("[SYS]")

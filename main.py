@@ -26,8 +26,12 @@ def main():
     print(f"  TTS:       XTTS v2 ({cfg.tts.speaker}) [streaming]")
     print(f"  LLM:       Gemini ({cfg.llm.model})")
     print(f"  VAD:       Silero (threshold={cfg.vad.threshold})")
-    print(f"  Intent:    DeBERTa v3 xsmall (zero-shot)")
-    print(f"  NER:       BERT base NER (dslim)")
+    if cfg.nlu.joint_nlu_enabled:
+        print(f"  NLU:       Joint DeBERTa (intent+slots) [{cfg.nlu.joint_nlu_model_path}]")
+    else:
+        print(f"  Intent:    DeBERTa v3 xsmall (zero-shot)")
+        print(f"  NER:       BERT base NER (dslim)")
+    print(f"  Confidence: high≥{cfg.nlu.confidence_high} low≥{cfg.nlu.confidence_low}")
     print("=" * 60)
     print()
 

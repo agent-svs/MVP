@@ -12,14 +12,14 @@ import random
 # ── Path A: Direct Action Templates ─────────────────────────
 
 BOOKING_CONFIRMED = [
-    "Your appointment is booked for {date} at {time}. We'll see you then, {name}!",
-    "All set! {name}, you're booked for {date} at {time}. Is there anything else?",
-    "Done! Your appointment is confirmed for {date} at {time}. See you soon, {name}.",
+    "Your appointment is booked for {date} at {time}. We'll see you then, {patient_name}!",
+    "All set! {patient_name}, you're booked for {date} at {time}. Is there anything else?",
+    "Done! Your appointment is confirmed for {date} at {time}. See you soon, {patient_name}.",
 ]
 
 CANCEL_CONFIRMED = [
-    "Your appointment has been cancelled, {name}. Would you like to reschedule?",
-    "All done, {name}. Your appointment has been cancelled. Is there anything else?",
+    "Your appointment has been cancelled, {patient_name}. Would you like to reschedule?",
+    "All done, {patient_name}. Your appointment has been cancelled. Is there anything else?",
 ]
 
 RESCHEDULE_CONFIRMED = [
@@ -28,8 +28,8 @@ RESCHEDULE_CONFIRMED = [
 ]
 
 STATUS_RESPONSE = [
-    "Let me check on that for you, {name}. One moment please.",
-    "Checking your appointment status, {name}.",
+    "Let me check on that for you, {patient_name}. One moment please.",
+    "Checking your appointment status, {patient_name}.",
 ]
 
 # ── Path B: Clarification Prompts ───────────────────────────
@@ -45,10 +45,10 @@ SLOT_PROMPTS = {
         "What time works best for you?",
         "And what time should I book that for?",
     ],
-    "name": [
-        "May I have your name, please?",
-        "Could you tell me your name?",
-        "And your name is?",
+    "patient_name": [
+        "May I have the patient's name, please?",
+        "Could you tell me the patient's name?",
+        "And what is the patient's name?",
     ],
     "phone": [
         "Could I get a phone number to reach you at?",
@@ -145,12 +145,12 @@ def get_booking_confirmed(slots: dict) -> str:
     return template.format(
         date=slots.get("date", "the scheduled date"),
         time=slots.get("time", "the scheduled time"),
-        name=slots.get("name", ""),
+        patient_name=slots.get("patient_name", ""),
     )
 
 def get_cancel_confirmed(slots: dict) -> str:
     template = random.choice(CANCEL_CONFIRMED)
-    return template.format(name=slots.get("name", ""))
+    return template.format(patient_name=slots.get("patient_name", ""))
 
 def get_reschedule_confirmed(slots: dict) -> str:
     template = random.choice(RESCHEDULE_CONFIRMED)
@@ -173,9 +173,9 @@ def get_action_response(intent: str, slots: dict) -> str:
     elif intent in ("reschedule", "reschedule_appointment"):
         return get_reschedule_confirmed(slots)
     elif intent in ("check_status", "check_appointment_status"):
-        return random.choice(STATUS_RESPONSE).format(name=slots.get("name", ""))
+        return random.choice(STATUS_RESPONSE).format(patient_name=slots.get("patient_name", ""))
     elif intent == "check_my_appointments":
-        return f"Let me look up your appointments, {slots.get('name', '')}. One moment please."
+        return f"Let me look up your appointments, {slots.get('patient_name', '')}. One moment please."
     elif intent == "change_date":
         return f"Your appointment date has been updated to {slots.get('date', 'the new date')}. All good?"
     elif intent == "change_doctor":
@@ -183,11 +183,11 @@ def get_action_response(intent: str, slots: dict) -> str:
     elif intent == "change_service":
         return f"Your appointment service has been changed to {slots.get('service_type', 'the new service')}. Anything else?"
     elif intent == "register_new_patient":
-        return f"Welcome, {slots.get('name', '')}! You've been registered. Is there anything else you need?"
+        return f"Welcome, {slots.get('patient_name', '')}! You've been registered. Is there anything else you need?"
     elif intent == "update_contact_info":
-        return f"Your contact information has been updated, {slots.get('name', '')}. Anything else?"
+        return f"Your contact information has been updated, {slots.get('patient_name', '')}. Anything else?"
     elif intent == "verify_patient_identity":
-        return f"Thank you, {slots.get('name', '')}. Your identity has been verified."
+        return f"Thank you, {slots.get('patient_name', '')}. Your identity has been verified."
     elif intent == "greeting":
         return get_greeting()
     elif intent == "goodbye":

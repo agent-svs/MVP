@@ -69,7 +69,7 @@ class RoutingResult:
 MAX_FAILED_TURNS = 3
 
 
-def route(nlu_result: dict) -> RoutingResult:
+def route(nlu_result: dict, last_response: str = "") -> RoutingResult:
     """
     Route a conversation turn based on NLU output.
 
@@ -77,7 +77,8 @@ def route(nlu_result: dict) -> RoutingResult:
         nlu_result: Dict from DST.process_turn() with keys:
             intent, confidence, slots, state, missing_slots,
             turn_count, failed_turns
-
+        last_response: The previous AI response to be used for repeat intents
+        
     Returns:
         RoutingResult with path, response text, and metadata
     """
@@ -240,7 +241,7 @@ def route(nlu_result: dict) -> RoutingResult:
         logger.info("Route → Path A (repeat)")
         return RoutingResult(
             path=Path.A_DIRECT,
-            response=get_repeat(),
+            response=last_response if last_response else get_repeat(),
         )
 
     # Correction / Continuation — user providing slot data

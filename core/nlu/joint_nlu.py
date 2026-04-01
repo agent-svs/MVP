@@ -6,6 +6,17 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from transformers import AutoTokenizer, AutoConfig
 from core.nlu.joint_model import JointDeBERTa
 from core.nlu.label_maps import ID_TO_INTENT, ID_TO_TAG, NUM_INTENTS, NUM_SLOT_LABELS
+from core.nlu.slots import _extract_date, _extract_time
+
+def _normalize_slot(name: str, raw_val: str) -> str:
+    """Normalize specific slots using slots.py heuristics."""
+    if name == "date":
+        res = _extract_date(raw_val)
+        if res: return res[0]
+    elif name == "time":
+        res = _extract_time(raw_val)
+        if res: return res[0]
+    return raw_val
 
 class JointNLU:
     def __init__(self):
@@ -117,11 +128,12 @@ class JointNLU:
                 if current_slot_name and current_slot_start != -1:
                     raw_val = utterance[current_slot_start:current_slot_end]
                     slots_found[current_slot_name] = {
-                        "value": raw_val.strip(),
+                        "value": _normalize_slot(current_slot_name, raw_val.strip()),
                         "confidence": sum(current_slot_conf) / len(current_slot_conf)
                     }
                     
-                current_slot_name = tag[2:].lower()
+                raw_slot_name = tag[2:].lower()
+                current_slot_name = "patient_name" if raw_slot_name == "name" else raw_slot_name
                 current_slot_start = start_c
                 current_slot_end = end_c
                 current_slot_conf = [conf]
@@ -136,7 +148,7 @@ class JointNLU:
                 if current_slot_name and current_slot_start != -1:
                     raw_val = utterance[current_slot_start:current_slot_end]
                     slots_found[current_slot_name] = {
-                        "value": raw_val.strip(),
+                        "value": _normalize_slot(current_slot_name, raw_val.strip()),
                         "confidence": sum(current_slot_conf) / len(current_slot_conf)
                     }
                     current_slot_name = None
@@ -148,7 +160,7 @@ class JointNLU:
         if current_slot_name and current_slot_start != -1:
             raw_val = utterance[current_slot_start:current_slot_end]
             slots_found[current_slot_name] = {
-                "value": raw_val.strip(),
+                "value": _normalize_slot(current_slot_name, raw_val.strip()),
                 "confidence": sum(current_slot_conf) / len(current_slot_conf)
             }
             

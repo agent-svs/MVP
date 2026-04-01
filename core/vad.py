@@ -41,8 +41,8 @@ class VAD:
         # State
         self._speech_buffer: list[np.ndarray] = []
         self._is_speaking = False
-        self._silence_start: Optional[float] = None
-        self._speech_start: Optional[float] = None
+        self._silence_chunks = 0
+        self._speech_chunks = 0
         self._audio_buffer = np.array([], dtype=np.float32)
 
         # Silero VAD requires exactly 512 samples per chunk at 16kHz
@@ -58,8 +58,8 @@ class VAD:
         """Reset VAD state for a new utterance."""
         self._speech_buffer.clear()
         self._is_speaking = False
-        self._silence_start = None
-        self._speech_start = None
+        self._silence_chunks = 0
+        self._speech_chunks = 0
         self._audio_buffer = np.array([], dtype=np.float32)
         self._model.reset_states()
 
@@ -99,43 +99,42 @@ class VAD:
 
         if speech_prob >= self.threshold:
             # Speech detected
-            self._silence_start = None
+            self._silence_chunks = 0
 
             if not self._is_speaking:
                 self._is_speaking = True
-                self._speech_start = now
+                self._speech_chunks = 0
                 logger.debug("Speech started")
 
             self._speech_buffer.append(audio_chunk)
+            self._speech_chunks += 1
 
         else:
             # Silence detected
             if self._is_speaking:
                 self._speech_buffer.append(audio_chunk)
+                self._silence_chunks += 1
 
-                if self._silence_start is None:
-                    self._silence_start = now
-                else:
-                    silence_duration_ms = (now - self._silence_start) * 1000
+                silence_duration_ms = (self._silence_chunks * self._vad_chunk_size / self.sample_rate) * 1000
 
-                    if silence_duration_ms >= self.min_silence_ms:
-                        # Check minimum speech duration
-                        speech_duration_ms = (now - self._speech_start) * 1000
-                        if speech_duration_ms >= self.min_speech_ms:
-                            # Emit complete utterance
-                            utterance = np.concatenate(self._speech_buffer)
-                            logger.info(
-                                f"Utterance complete: {len(utterance)} samples "
-                                f"({speech_duration_ms:.0f}ms speech)"
-                            )
-                            self.reset()
-                            return utterance
-                        else:
-                            # Too short — likely noise, discard
-                            logger.debug(
-                                f"Discarding short speech: {speech_duration_ms:.0f}ms"
-                            )
-                            self.reset()
+                if silence_duration_ms >= self.min_silence_ms:
+                    # Check minimum speech duration
+                    speech_duration_ms = (self._speech_chunks * self._vad_chunk_size / self.sample_rate) * 1000
+                    if speech_duration_ms >= self.min_speech_ms:
+                        # Emit complete utterance
+                        utterance = np.concatenate(self._speech_buffer)
+                        logger.info(
+                            f"Utterance complete: {len(utterance)} samples "
+                            f"({speech_duration_ms:.0f}ms speech)"
+                        )
+                        self.reset()
+                        return utterance
+                    else:
+                        # Too short — likely noise, discard
+                        logger.debug(
+                            f"Discarding short speech: {speech_duration_ms:.0f}ms"
+                        )
+                        self.reset()
 
         return None
 

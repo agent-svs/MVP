@@ -25,7 +25,7 @@ DISFLUENCY_PATTERNS = [
     # Filler words (whole words only)
     r"\b(um+|uh+|uh-huh|mm+|hmm+|er+|ah+)\b",
     # Hedge phrases
-    r"\b(you know|i mean|like|basically|actually|sort of|kind of)\b",
+    r"\b(you know|i mean|basically|sort of|kind of)\b",
 ]
 
 # Pre-compile for performance
@@ -122,6 +122,19 @@ class STT:
         if self._model is None:
             self.load()
 
+        # Audio energy and duration gates to prevent Whisper hallucination
+        max_amp = np.max(np.abs(audio))
+        rms = np.sqrt(np.mean(audio**2))
+        duration_s = len(audio) / 16000
+        
+        # Log the levels so we can tune them
+        logger.debug(f"Audio check: duration={duration_s:.2f}s, max_amp={max_amp:.4f}, rms={rms:.4f}")
+        
+        # Strict gate for silence/static
+        if max_amp < 0.05 or duration_s < 0.8:
+            logger.info(f"STT skipped — too short/quiet (max={max_amp:.4f}, rms={rms:.4f}, dur={duration_s:.2f}s)")
+            return "", 0.0
+
         lang = language or self.language
         t0 = time.time()
 
@@ -140,6 +153,21 @@ class STT:
 
         raw_text = " ".join(text_parts).strip()
         elapsed = time.time() - t0
+
+        # Hallucination blocklist
+        WHISPER_HALLUCINATIONS = {
+            "thanks for watching", "thank you for watching",
+            "thank you", "thanks", "bye", "you",
+            "please subscribe", "see you next time",
+            "in the name of allah", "in the name of allah, the most gracious, the most merciful",
+            "pooja salil", "pooja salil karo", "built up in america",
+            "thank you very much", "thanks for coming", "i'll see you later"
+        }
+        
+        lower_stripped = raw_text.lower().strip('.!?, ')
+        if lower_stripped in WHISPER_HALLUCINATIONS or lower_stripped.startswith("in the name of allah"):
+            logger.info(f"STT hallucination blocked: '{raw_text}'")
+            return "", elapsed
 
         # Apply disfluency filter
         if clean and raw_text:

@@ -47,18 +47,18 @@ class State(str, Enum):
 
 # Required slots per intent (29-label set)
 REQUIRED_SLOTS = {
-    "book_appointment": ["service_type", "date", "time", "name"],
-    "cancel_appointment": ["name"],
+    "book_appointment": ["service_type", "date", "time", "patient_name"],
+    "cancel_appointment": ["patient_name"],
     "reschedule_appointment": ["date", "time"],
-    "check_appointment_status": ["name"],
-    "check_my_appointments": ["name"],
+    "check_appointment_status": ["patient_name"],
+    "check_my_appointments": ["patient_name"],
     "change_date": ["date"],
     "change_time": ["time"],
     "change_doctor": ["doctor_name"],
     "change_service": ["service_type"],
-    "register_new_patient": ["name", "phone"],
-    "update_contact_info": ["name", "phone"],
-    "verify_patient_identity": ["name"],
+    "register_new_patient": ["patient_name", "phone"],
+    "update_contact_info": ["patient_name", "phone"],
+    "verify_patient_identity": ["patient_name"],
     "confirm_appointment": [],
     "doctor_availability": [],
     # These intents require no slots:
@@ -183,11 +183,18 @@ class DialogueStateTracker:
                 for key, val in self.slots.items():
                     if key in REQUIRED_SLOTS[new_intent]:
                         preserved_slots[key] = val
+            elif self.intent in ("greeting", None):
+                preserved_slots = self.slots.copy()
 
             self.intent = new_intent
             self.intent_confidence = confidence
             self.slots = preserved_slots
-            self.slots.update(new_slots)
+            
+            # Smart slot update: don't overwrite existing slots unless it's a new conversation or correction
+            for k, v in new_slots.items():
+                if k not in self.slots or self.intent in ("change_date", "change_time", "change_doctor", "change_service", "update_contact_info"):
+                    self.slots[k] = v
+            
             self.failed_turns = 0
         else:
             # Continuation — merge slots (new values override old)
@@ -229,7 +236,11 @@ class DialogueStateTracker:
             new_intent = None
             # Slot answer (continuation)
             self._last_classified_intent = "continuation"
-            self.slots.update(new_slots)
+            
+            # Smart slot update: don't overwrite existing slots when collecting
+            for k, v in new_slots.items():
+                if k not in self.slots or not self.slots[k].get("value"):
+                    self.slots[k] = v
         else:
             is_correction = self._is_slot_correction(text, new_slots, new_intent)
             
@@ -243,14 +254,24 @@ class DialogueStateTracker:
                     for key, val in self.slots.items():
                         if key in REQUIRED_SLOTS[new_intent]:
                             preserved_slots[key] = val
+                elif self.intent in ("greeting", None):
+                    preserved_slots = self.slots.copy()
                             
                 self.intent = new_intent
                 self.intent_confidence = confidence
                 self.slots = preserved_slots
-                self.slots.update(new_slots)
+                
+                # Smart slot update: don't overwrite existing slots
+                for k, v in new_slots.items():
+                    if k not in self.slots or self.intent in ("change_date", "change_time", "change_doctor", "change_service", "update_contact_info"):
+                        self.slots[k] = v
+                        
                 self.failed_turns = 0
             else:
-                self.slots.update(new_slots)
+                # Continuation — merge slots (new values don't override unless empty)
+                for k, v in new_slots.items():
+                    if k not in self.slots or not self.slots[k].get("value"):
+                        self.slots[k] = v
                 if confidence > self.intent_confidence:
                     self.intent_confidence = confidence
                     
@@ -414,6 +435,9 @@ class DialogueStateTracker:
         else:
             output_intent = self.intent
             active_intent = self.intent
+
+        if output_intent is None:
+            output_intent = "continuation"
 
         result = {
             "intent": output_intent,

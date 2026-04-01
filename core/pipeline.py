@@ -139,7 +139,7 @@ class VoicePipeline:
         slots = nlu_result["slots"]
 
         # 4. Route to appropriate path
-        routing = route(nlu_result)
+        routing = route(nlu_result, last_response=self._last_response)
         print(f"  🔀 Path {routing.path.value}: {intent}")
 
         # 4b. Log the NLU turn result
@@ -156,15 +156,20 @@ class VoicePipeline:
                 print(f"  💬 Filler: \"{routing.filler}\"")
                 self._speak_async(routing.filler)
 
-            # Call LLM with current slot context
-            response, llm_elapsed = self.llm.generate(text, context=slots)
+            # Call LLM with current slot context, history, and active intent
+            context_data = {
+                "slots": slots,
+                "recent_history": [h["text"] for h in self.dst.history[-4:]],
+                "active_intent": intent
+            }
+            response, llm_elapsed = self.llm.generate(text, context=context_data)
             print(f"  🤖 LLM ({llm_elapsed:.2f}s): \"{response[:80]}\"")
         else:
             response = routing.response
 
         # 5b. Set expectation for clarify responses
         # When the AI asks "What date?", tell the DST to expect a date next turn
-        if not cfg.nlu.joint_nlu_enabled and routing.path.value == "clarify" and routing.metadata:
+        if routing.path.value == "clarify" and routing.metadata:
             next_slot = routing.metadata.get("missing_slot")
             if next_slot:
                 self.dst.set_expectation(next_slot, response)
@@ -175,7 +180,12 @@ class VoicePipeline:
             for w in guard_result.warnings:
                 print(f"  ⚠️  {w}")
 
-        final_response = guard_result.text
+        if not guard_result.passed:
+            # Override response if guardrails firmly blocked it (e.g., past date)
+            final_response = "I'm sorry, I can't do that. " + " ".join(guard_result.warnings)
+        else:
+            final_response = guard_result.text
+            
         self._last_response = final_response
 
         # 7. Speak response (with barge-in monitoring)
@@ -228,6 +238,8 @@ class VoicePipeline:
 
         finally:
             self._is_speaking_response = False
+            self.vad.reset()  # Clear VAD buffer completely to strip out TTS mic bleed
+            time.sleep(0.3)   # Cooldown before listening again to avoid echo
 
     def _barge_in_monitor(self) -> None:
         """Monitor mic for speech during TTS playback."""

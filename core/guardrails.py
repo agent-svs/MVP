@@ -20,10 +20,13 @@ _SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 _CREDIT_CARD_RE = re.compile(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b")
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
 
-# ── Business Hours ──────────────────────────────────────────
-BUSINESS_HOURS_START = 9   # 9 AM
-BUSINESS_HOURS_END = 17    # 5 PM
+# ── Business Hours & Rules ────────────────────────────────
+BUSINESS_HOURS_START = 8   # 8 AM (Apex Clinic)
+BUSINESS_HOURS_END = 18    # 6 PM (Apex Clinic)
 BUSINESS_DAYS = {0, 1, 2, 3, 4}  # Mon-Fri
+
+CLINIC_DOCTORS = {"dr. smith", "dr. patel", "dr. lee"}
+CLINIC_SERVICES = {"general checkup", "general practice", "cardiology", "pediatrics"}
 
 # Max response length for voice (characters)
 MAX_RESPONSE_LENGTH = 500
@@ -92,13 +95,34 @@ def validate_time(time_str: str) -> list[str]:
     return issues
 
 
+def extract_val(v):
+    if isinstance(v, dict) and "value" in v:
+        return v["value"]
+    return v
+
+def validate_doctor(doctor_name: str) -> list[str]:
+    issues = []
+    if doctor_name.lower().strip() not in CLINIC_DOCTORS:
+        issues.append(f"Doctor '{doctor_name}' is not registered at Apex Medical Clinic")
+    return issues
+
+def validate_service(service_type: str) -> list[str]:
+    issues = []
+    if service_type.lower().strip() not in CLINIC_SERVICES:
+        issues.append(f"Service '{service_type}' is not provided at Apex Medical Clinic")
+    return issues
+
 def validate_slots(slots: dict) -> list[str]:
     """Validate all slots against business rules."""
     issues = []
-    if "date" in slots:
-        issues.extend(validate_date(slots["date"]))
-    if "time" in slots:
-        issues.extend(validate_time(slots["time"]))
+    if "date" in slots and slots["date"]:
+        issues.extend(validate_date(extract_val(slots["date"])))
+    if "time" in slots and slots["time"]:
+        issues.extend(validate_time(extract_val(slots["time"])))
+    if "doctor_name" in slots and slots["doctor_name"]:
+        issues.extend(validate_doctor(extract_val(slots["doctor_name"])))
+    if "service_type" in slots and slots["service_type"]:
+        issues.extend(validate_service(extract_val(slots["service_type"])))
     return issues
 
 
@@ -148,7 +172,11 @@ def apply_guardrails(
     text = cap_response_length(text)
 
     # Determine if we should block or just warn
-    passed = not any("past" in w.lower() for w in warnings)
+    block_keywords = {"past", "weekend", "outside business hours", "not registered", "not provided"}
+    passed = not any(
+        any(k in w.lower() for k in block_keywords)
+        for w in warnings
+    )
 
     if warnings:
         logger.info(f"Guardrails: {len(warnings)} warnings — {warnings}")

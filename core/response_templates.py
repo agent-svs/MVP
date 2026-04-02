@@ -55,22 +55,21 @@ SLOT_PROMPTS = {
         "What's the best number to contact you?",
     ],
     "service_type": [
-        "What type of service are you looking for?",
-        "Which service would you like to book?",
+        "Are you booking for a General Checkup, Pediatrics, or Cardiology?",
+        "Which service do you need? We offer General Checkups, Pediatrics, and Cardiology.",
     ],
     "doctor_name": [
-        "Which doctor would you like to see?",
-        "Do you have a preferred doctor?",
+        "Which doctor would you like to see? We have Dr. Smith, Dr. Patel, and Dr. Lee.",
+        "Do you have a preferred doctor? You can choose Dr. Smith, Dr. Patel, or Dr. Lee.",
     ],
 }
 
 # ── Greetings & Goodbyes ────────────────────────────────────
 
 GREETINGS = [
-    "Hello! Welcome. How can I help you today?",
-    "Hi there! What can I do for you?",
-    "Good day! How may I assist you?",
-    "Welcome! I'm here to help. What do you need?",
+    "Hello! Welcome to Apex Medical Clinic. How can I help you today?",
+    "Hi there! You've reached Apex Medical Clinic. What can I do for you?",
+    "Good day! Welcome to Apex Medical Clinic. How may I assist you?",
 ]
 
 GOODBYES = [
@@ -91,8 +90,8 @@ FILLERS = [
 # ── Out of Domain ───────────────────────────────────────────
 
 OUT_OF_DOMAIN = [
-    "I'm not sure I can help with that. I can assist with booking, cancelling, or rescheduling appointments. Would you like help with any of those?",
-    "That's outside what I can help with. I'm best at managing appointments. How can I assist you with that?",
+    "I'm not sure I can help with that. Here at Apex Medical Clinic, I can only assist with booking, cancelling, or rescheduling appointments.",
+    "That's outside what I can help with. I'm best at managing appointments for Apex Medical Clinic.",
 ]
 
 # ── Escalation ──────────────────────────────────────────────

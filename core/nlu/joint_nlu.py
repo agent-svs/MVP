@@ -27,7 +27,9 @@ class JointNLU:
     def load(self, model_path="models/joint_nlu/"):
         """Load model + tokenizer once."""
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Joint NLU model not found at {model_path}. Please train it first.")
+            logger.info(f"Local model not found at '{model_path}'. Assuming HuggingFace repo ID...")
+            # Automatically fallback to the published HuggingFace repository
+            model_path = "agents-svs/voice-receptionist-joint-nlu"
             
         print(f"Loading Joint NLU from {model_path} onto {self.device}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)

@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from transformers import DebertaV2PreTrainedModel, DebertaV2Model
-from typing import Optional, Tuple, Dict, Any
+from typing import Any, Dict, Optional
 
 class JointDeBERTa(DebertaV2PreTrainedModel):
     def __init__(self, config):

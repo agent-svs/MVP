@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-voice-receptionist"
+version = "0.2.0"
+description = "Voice receptionist: Mic → VAD → STT → Joint NLU → DST → Router → LLM → Guardrails → TTS"
+requires-python = ">=3.11,<3.13"
+
+# ── pytest ────────────────────────────────────────────────────
+# Declaring this here pins the rootdir to THIS project. Without it pytest
+# walks up the filesystem and inherits ~/pyproject.toml, which injects
+# --cov=app and makes the suite fail to start.
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: loads a real ML model or hits the network (deselect with -m 'not slow')",
+    "integration: exercises several layers end to end",
+    "audio: requires a real audio device",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+asyncio_default_fixture_loop_scope = "function"
+log_cli = false

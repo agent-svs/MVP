@@ -1,37 +1,54 @@
-# Environment
+# ── Environment ──────────────────────────────────────────────
 .env
+.env.local
 venv/
 .venv/
 
-# Python
+# ── Python ───────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
 
-# Models (downloaded at runtime)
+# ── Model weights (download via HuggingFace Hub or train locally) ──
+models/
 *.bin
 *.pt
 *.onnx
+*.safetensors
 
-# Audio cache
+# ── Runtime artifacts ────────────────────────────────────────
+# TTS phrase cache (regenerated on demand; may contain synthesized PII)
 assets/cache/
+# Conversation / NLU logs — contain patient PII. NEVER commit.
+logs/
+!logs/.gitkeep
+# TensorBoard training runs
+events.out.tfevents.*
+runs/
 
-# IDE
+# ── Tooling ──────────────────────────────────────────────────
+.tokensave/
+.claude/settings.local.json
+
+# ── IDE ──────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS
+# ── OS ───────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# Misc files
+# ── Misc ─────────────────────────────────────────────────────
 download.png
 random.txt
-
-# Fine-tuned model weights (download via HuggingFace Hub or train locally)
-models/

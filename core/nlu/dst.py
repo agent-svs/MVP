@@ -82,6 +82,35 @@ CONVERSATIONAL_INTENTS = frozenset({
     "help", "correction", "continuation", "clarification_needed",
 })
 
+# A change_* intent targets exactly one slot. The new value must come from
+# THIS turn — otherwise the agent offers to "change" a slot to the value it
+# already holds ("I'll change your appointment to General Checkup").
+CHANGE_INTENT_TARGET = {
+    "change_date": "date",
+    "change_time": "time",
+    "change_doctor": "doctor_name",
+    "change_service": "service_type",
+}
+
+# Verb cues that justify abandoning an in-flight task for a different one.
+# Without this, a misheard turn ("change it to cardiologist" read as
+# update_contact_info at 0.86 confidence) silently replaced the live booking.
+_TASK_CUES = {
+    "book_appointment": r"\b(book|schedule|appointment|come in|slot)\b",
+    "cancel_appointment": r"\b(cancel|call off|scrap|drop)\b",
+    "reschedule_appointment": r"\b(reschedul\w*|move|postpone|push|shift)\b",
+    "register_new_patient": r"\b(register|new patient|sign up|enrol\w*)\b",
+    "update_contact_info": r"\b(number|phone|contact|address|email)\b",
+    "verify_patient_identity": r"\b(verify|verification|identity|confirm who)\b",
+    "check_appointment_status": r"\b(status|check)\b",
+    "check_my_appointments": r"\b(my appointments|what appointments|upcoming)\b",
+    "change_date": r"\b(date|day)\b",
+    "change_time": r"\b(time|hour|o.?clock|am|pm)\b",
+    "change_doctor": r"\b(doctor|dr\.?|physician|specialist)\b",
+    "change_service": r"\b(service|specialty|speciality|department)\b",
+}
+_TASK_CUE_RES = {k: re.compile(v, re.IGNORECASE) for k, v in _TASK_CUES.items()}
+
 CORRECTION_TRIGGERS = re.compile(
     r'\b(actually|no|change|not|instead|wrong|correct|make it|switch to|'
     r'rather|different|sorry i meant|i meant)\b',
@@ -109,6 +138,27 @@ _QUESTION_RE = re.compile(
 
 # Safety net: on a medical line an emergency must never be missed because
 # the model was primed by the previous system turn. These override everything.
+# A repeat request is short and contains an explicit "say it again" cue.
+# Matching on intent alone let "Go with consultation." replay the last line.
+_REPEAT_BARE_RE = re.compile(
+    r'^(what|sorry|pardon|huh|eh|come again)[?.!]*$', re.IGNORECASE
+)
+_REPEAT_PHRASE_RE = re.compile(
+    r'\b(say (that|it) again|again please|come again|repeat (that|it|yourself)?|'
+    r'one more time|(didn\'?t|did not|couldn\'?t) (hear|catch|get) (that|you|it))\b',
+    re.IGNORECASE,
+)
+
+
+def _is_repeat_request(text: str) -> bool:
+    text = (text or "").strip()
+    if not text:
+        return False
+    if _REPEAT_BARE_RE.match(text):
+        return True
+    # Long utterances carry their own content; they are not repeat requests.
+    return len(text.split()) <= 8 and bool(_REPEAT_PHRASE_RE.search(text))
+
 _EMERGENCY_RE = re.compile(
     r'\b(heart attack|cardiac arrest|stroke|chest pain|can\'?t breathe|'
     r'cannot breathe|not breathing|unconscious|passed out|choking|'
@@ -160,6 +210,7 @@ class DialogueStateTracker:
         self.pending_slot: Optional[str] = None
         self.last_question: Optional[str] = None
         self._last_classified_intent: Optional[str] = None
+        self._current_text: str = ""
         # Set when validation rejects a slot; the router speaks it and the DST
         # clears the offending slot so the caller can supply a new value.
         self.repair_message: Optional[str] = None
@@ -186,6 +237,7 @@ class DialogueStateTracker:
         """Process a user utterance and update state."""
         self.turn_count += 1
         self.repair_message = None
+        self._current_text = text or ""
 
         if cfg.nlu.joint_nlu_enabled:
             if joint_nlu_engine is None:
@@ -267,6 +319,10 @@ class DialogueStateTracker:
                 f"Demoting {new_intent} → out_of_domain: {stripped!r} is a question"
             )
             new_intent, confidence = "out_of_domain", min(confidence, 0.4)
+        elif new_intent == "repeat" and not _is_repeat_request(stripped):
+            # Only an actual "say that again" is a repeat request.
+            logger.info(f"Demoting repeat → continuation: {stripped!r}")
+            new_intent = None
 
         # 2. A None/slot_answer intent means "this answers my question".
         if new_intent is None or new_intent == "slot_answer":
@@ -317,6 +373,21 @@ class DialogueStateTracker:
                 return self._build_result(text)
 
         # 5. Explicit slot correction ("actually, make it 5 pm").
+        # If the caller clearly signalled a change but the tagger produced no
+        # span, fall back to the deterministic extractors before giving up.
+        if (
+            not new_slots
+            and self.intent in ACTION_INTENTS
+            and CORRECTION_TRIGGERS.search(stripped)
+            and self.state in (State.COLLECTING, State.CONFIRMING)
+        ):
+            for candidate in ("service_type", "date", "time"):
+                recovered = self._recover_slot_from_text(candidate, stripped)
+                if recovered is not None:
+                    new_slots[candidate] = recovered
+                    logger.info(f"Recovered '{candidate}' from correction phrase")
+                    break
+
         if self._is_slot_correction(text, new_slots, new_intent):
             logger.info(f"Slot correction: {list(new_slots)}")
             self._merge_slots(new_slots, overwrite=True)
@@ -336,15 +407,27 @@ class DialogueStateTracker:
             self._update_state()
             return self._build_result(text)
 
+        # 5b. A change_* intent must carry its new value.
+        if new_intent in CHANGE_INTENT_TARGET:
+            target = CHANGE_INTENT_TARGET[new_intent]
+            if not _is_filled(new_slots.get(target)):
+                recovered = self._recover_slot_from_text(target, text)
+                if recovered is not None:
+                    new_slots[target] = recovered
+                    logger.info(f"Recovered '{target}' from raw text for {new_intent}")
+                else:
+                    # Drop the stale value so the router asks what to change to.
+                    self.slots.pop(target, None)
+                    logger.info(
+                        f"{new_intent} with no new '{target}' — clearing it and asking"
+                    )
+
         # 6. New conversation / topic switch.
         if self._is_new_conversation(new_intent, confidence):
-            preserved: dict[str, Any] = {}
-            if self.intent in REQUIRED_SLOTS and new_intent in REQUIRED_SLOTS:
-                for key, val in self.slots.items():
-                    if key in REQUIRED_SLOTS[new_intent]:
-                        preserved[key] = val
-            elif self.intent in ("greeting", None):
-                preserved = dict(self.slots)
+            # Carry everything across. Slot values are semantically stable
+            # (a date is a date), so preserving them lets the caller take a
+            # detour and come back instead of starting over.
+            preserved: dict[str, Any] = dict(self.slots)
 
             self.intent = new_intent
             self.intent_confidence = confidence
@@ -393,9 +476,21 @@ class DialogueStateTracker:
             # tagger routinely over-extends spans ("to book a checkup"), which
             # drags the mean below the threshold for a slot we know precisely.
             resolved = isinstance(val, dict) and val.get("canonical_id")
-            if not resolved and _slot_confidence(val) < cfg.nlu.slot_confidence_threshold:
-                logger.debug(f"Dropping low-confidence slot {key}={_slot_value(val)!r}")
+            # We asked for this slot, so the reply almost certainly answers it.
+            expected = key == self.pending_slot
+            bar = (
+                cfg.nlu.slot_confidence_pending if expected
+                else cfg.nlu.slot_confidence_threshold
+            )
+            if not resolved and _slot_confidence(val) < bar:
+                logger.debug(
+                    f"Dropping low-confidence slot {key}={_slot_value(val)!r} "
+                    f"({_slot_confidence(val):.2f} < {bar})"
+                )
                 continue
+            if expected:
+                self.pending_slot = None
+                self.last_question = None
             if overwrite or force or not _is_filled(self.slots.get(key)):
                 self.slots[key] = val
                 self.declined_confirmation = False
@@ -442,6 +537,38 @@ class DialogueStateTracker:
             return True
         return False
 
+    @staticmethod
+    def _recover_slot_from_text(slot_name: str, text: str) -> Optional[dict]:
+        """Deterministic fallback when the tagger misses a slot.
+
+        The joint model's slot tagging is context-sensitive: it reads
+        "change it to cardiologist" as change_service but sometimes emits no
+        span. The regex/catalogue extractors do not have that failure mode.
+        """
+        from core.nlu.entities import entity_store
+        from core.nlu.slots import _extract_date, _extract_service, _extract_time
+
+        extractor = {
+            "date": _extract_date,
+            "time": _extract_time,
+            "service_type": _extract_service,
+        }.get(slot_name)
+        if extractor is None:
+            return None
+
+        result = extractor(text)
+        if not result:
+            return None
+
+        value, confidence = result
+        entry: dict[str, Any] = {"value": value, "confidence": confidence}
+        canonical = entity_store.resolve_entity(slot_name, value)
+        if canonical:
+            entry["canonical_id"] = canonical["id"]
+            entry["canonical_name"] = canonical["canonical_name"]
+            entry["value"] = canonical["canonical_name"]
+        return entry
+
     def _raw_text_to_slot(self, slot_name: str, text: str) -> Optional[str]:
         """Map a bare answer to a slot value (legacy path only)."""
         text = text.strip().rstrip('.!?,;')
@@ -485,6 +612,40 @@ class DialogueStateTracker:
             and self.missing_slots
         ):
             return False
+
+        # A task is in flight and the caller has already given us real data.
+        # Only a deliberate question or another concrete task may take over —
+        # otherwise a garbled utterance ("concentration") gets read as an FAQ
+        # intent and silently destroys the booking.
+        if (
+            self.state in (State.COLLECTING, State.CONFIRMING)
+            and self.intent in ACTION_INTENTS
+            and any(_is_filled(v) for v in self.slots.values())
+            and new_intent not in ACTION_INTENTS
+            and new_intent not in ("complaint", "transfer_to_human", "emergency_request")
+        ):
+            if not _QUESTION_RE.match((self._current_text or "").strip()):
+                logger.info(
+                    f"Holding task {self.intent!r}: {new_intent!r} is not a question "
+                    "and would discard collected slots"
+                )
+                return False
+
+        # Switching between concrete tasks needs a cue for the NEW task.
+        if (
+            self.state in (State.COLLECTING, State.CONFIRMING)
+            and self.intent in ACTION_INTENTS
+            and new_intent in ACTION_INTENTS
+            and new_intent != self.intent
+            and any(_is_filled(v) for v in self.slots.values())
+        ):
+            cue = _TASK_CUE_RES.get(new_intent)
+            if cue and not cue.search(self._current_text or ""):
+                logger.info(
+                    f"Holding task {self.intent!r}: no cue for {new_intent!r} in "
+                    f"{self._current_text!r}"
+                )
+                return False
         # A modification intent refines the active task rather than replacing it.
         if (
             new_intent in ("change_date", "change_time", "change_doctor", "change_service")

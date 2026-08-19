@@ -33,6 +33,8 @@ _NON_WORD_RE = re.compile(r'[^\w\s]')
 # but rejects "Bones"→"Jones" (0.80) and "Smyth"→"Smith" (0.80).
 _TYPO_RATIO = 0.86
 _MIN_TYPO_LEN = 5
+# Shared-prefix length that counts as the same domain term.
+_MIN_STEM_LEN = 6
 
 
 def _normalize(text: str) -> str:
@@ -64,25 +66,35 @@ class EntityStore:
              "aliases": ["follow up", "followup", "follow-up", "review"]},
             {"id": "SRV_004", "name": "Vaccination",
              "aliases": ["vaccine", "vaccination", "shot", "flu shot", "immunization"]},
-            {"id": "SRV_005", "name": "Cardiology", "aliases": ["cardiology", "cardiac", "heart"]},
-            {"id": "SRV_006", "name": "Dermatology", "aliases": ["dermatology", "skin"]},
+            {"id": "SRV_005", "name": "Cardiology",
+             "aliases": ["cardiology", "cardiac", "heart", "cardiologist"]},
+            {"id": "SRV_006", "name": "Dermatology",
+             "aliases": ["dermatology", "skin", "dermatologist"]},
             {"id": "SRV_007", "name": "Pediatrics",
-             "aliases": ["pediatrics", "paediatrics", "child", "children"]},
+             "aliases": ["pediatrics", "paediatrics", "child", "children",
+                         "pediatrician", "paediatrician"]},
             {"id": "SRV_008", "name": "Orthopedics",
-             "aliases": ["orthopedics", "orthopaedics", "ortho", "bone"]},
-            {"id": "SRV_009", "name": "Neurology", "aliases": ["neurology", "neuro"]},
-            {"id": "SRV_010", "name": "ENT", "aliases": ["ent", "ear nose throat"]},
+             "aliases": ["orthopedics", "orthopaedics", "ortho", "bone",
+                         "orthopedist", "orthopaedist"]},
+            {"id": "SRV_009", "name": "Neurology",
+             "aliases": ["neurology", "neuro", "neurologist"]},
+            {"id": "SRV_010", "name": "ENT",
+             "aliases": ["ent", "ear nose throat", "ear nose and throat",
+                         "otolaryngology", "otolaryngologist"]},
             {"id": "SRV_011", "name": "Dental",
-             "aliases": ["dental", "dentist", "teeth", "dental checkup", "dental cleaning",
-                         "teeth cleaning", "root canal"]},
+             "aliases": ["dental", "dentist", "teeth", "tooth", "dental checkup",
+                         "dental cleaning", "teeth cleaning", "root canal", "dentistry"]},
             {"id": "SRV_012", "name": "Ophthalmology",
-             "aliases": ["ophthalmology", "eye", "eye exam", "vision test", "eye test"]},
+             "aliases": ["ophthalmology", "eye", "eye exam", "vision test", "eye test",
+                         "ophthalmologist", "optometrist", "optometry"]},
             {"id": "SRV_013", "name": "Psychiatry",
-             "aliases": ["psychiatry", "mental health", "therapy"]},
+             "aliases": ["psychiatry", "mental health", "therapy",
+                         "psychiatrist", "psychologist", "psychology"]},
             {"id": "SRV_014", "name": "Gastroenterology",
-             "aliases": ["gastroenterology", "gastro", "stomach"]},
+             "aliases": ["gastroenterology", "gastro", "stomach", "gastroenterologist"]},
             {"id": "SRV_015", "name": "Gynecology",
-             "aliases": ["gynecology", "gynaecology", "gyno"]},
+             "aliases": ["gynecology", "gynaecology", "gyno",
+                         "gynecologist", "gynaecologist"]},
             {"id": "SRV_016", "name": "Blood Test",
              "aliases": ["blood test", "blood work", "lab work", "labs"]},
             {"id": "SRV_017", "name": "Imaging",
@@ -107,6 +119,20 @@ class EntityStore:
         if len(s_tokens) > 1 and len(c_tokens) > 1:
             overlap = len(s_tokens & c_tokens) / max(len(s_tokens), len(c_tokens))
             if overlap >= 0.75:
+                return 0.9
+
+        # Morphological match: "cardiologist" vs "cardiology" share a long
+        # stem but only score 0.82 on raw similarity, so typo tolerance alone
+        # rejected every practitioner noun. A long shared prefix is strong
+        # evidence for domain terms while staying safe for short surnames
+        # ("Bones"/"Jones" and "Smyth"/"Smith" share almost no prefix).
+        if len(s) >= _MIN_STEM_LEN and len(c) >= _MIN_STEM_LEN:
+            shared = 0
+            for a, b in zip(s, c):
+                if a != b:
+                    break
+                shared += 1
+            if shared >= _MIN_STEM_LEN:
                 return 0.9
 
         # Typo tolerance — tightly gated so near-miss surnames don't collide.

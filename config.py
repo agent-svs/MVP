@@ -216,6 +216,10 @@ class NLUConfig:
     ner_model: str = "dslim/bert-base-NER"
     # Minimum slot confidence to accept an extracted slot value.
     slot_confidence_threshold: float = 0.75
+    # When we explicitly asked for a slot, the prior that the reply answers
+    # it is very high, so a lower tagger confidence is acceptable. Unusual
+    # names tokenise badly and scored 0.57-0.69, well under the general bar.
+    slot_confidence_pending: float = 0.40
 
 
 @dataclass
@@ -381,6 +385,7 @@ class Config:
             ),
             ner_model=_get_env("NER_MODEL", "dslim/bert-base-NER"),
             slot_confidence_threshold=_get_env_float("NLU_SLOT_CONFIDENCE", 0.75),
+            slot_confidence_pending=_get_env_float("NLU_SLOT_CONFIDENCE_PENDING", 0.40),
         )
 
         business = BusinessConfig(

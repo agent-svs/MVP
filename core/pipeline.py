@@ -217,7 +217,12 @@ class VoicePipeline:
         self._speak_with_barge_in(final_response)
 
         if routing.end_conversation:
-            logger.info("Conversation ended by routing decision")
+            # Start a clean call rather than leaving the previous caller's
+            # intent and slots in place for whoever speaks next.
+            logger.info("Conversation ended — resetting for the next call")
+            self.dst.reset()
+            self.llm.clear_history()
+            self._last_response = ""
 
     # ── speech output ───────────────────────────────────────
     def _speak(self, text: str) -> None:
@@ -320,20 +325,32 @@ class VoicePipeline:
         """
         started = time.time()
         grace = cfg.vad.barge_in_grace_ms / 1000.0
+        self.vad.reset_barge_in()
         while self._speaking.is_set():
-            chunk = self.audio_in.read_chunk(timeout=0.05)
+            chunk = self.audio_in.read_chunk(timeout=0.02)
             if chunk is None:
                 continue
+            # Drain everything already queued in this pass. Reading one chunk
+            # per 50ms could not keep up with 30ms frames, so the queue
+            # overflowed continuously and logged thousands of dropped chunks.
+            chunks = [chunk]
+            while True:
+                extra = self.audio_in.read_chunk(timeout=0.0)
+                if extra is None:
+                    break
+                chunks.append(extra)
+
             # Early playback still overlaps the previous turn's reverb.
             if time.time() - started < grace:
                 continue
             try:
-                clean = self.preprocessor.process_chunk(chunk)
-                if self.vad.check_barge_in(clean):
-                    self._barge_in.set()
-                    self.audio_out.interrupt()
-                    logger.info("Barge-in detected")
-                    return
+                for c in chunks:
+                    clean = self.preprocessor.process_chunk(c)
+                    if self.vad.check_barge_in(clean):
+                        self._barge_in.set()
+                        self.audio_out.interrupt()
+                        logger.info("Barge-in detected — interrupting playback")
+                        return
             except Exception as e:
                 logger.debug(f"Barge-in check failed: {e}")
 

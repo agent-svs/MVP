@@ -138,3 +138,36 @@ def test_echo_cooldown_is_configured():
     """Re-arming the mic the instant playback stops let the speaker tail be
     transcribed as the caller's reply."""
     assert cfg.audio.echo_cooldown_ms >= 200
+
+
+# ── the barge-in-never-fires regression ─────────────────────
+def test_barge_in_accumulates_short_mic_chunks():
+    """Mic chunks are 480 samples; the Silero window is 512. A per-call length
+    check meant check_barge_in returned False for every chunk ever passed to
+    it, so barge-in had never once fired."""
+    from core.vad import VAD
+
+    v = VAD()
+    assert cfg.audio.chunk_samples < v._vad_chunk_size, "premise of the bug"
+
+    loud = (np.random.default_rng(7).standard_normal(cfg.audio.chunk_samples) * 0.5).astype(np.float32)
+    v.check_barge_in(loud)
+    # The first sub-window chunk must be buffered, not discarded.
+    assert len(v._barge_buffer) > 0 or v._barge_hits > 0
+
+
+def test_barge_in_ignores_quiet_echo_across_many_chunks():
+    from core.vad import VAD
+
+    v = VAD()
+    quiet = (np.random.default_rng(8).standard_normal(480) * 0.02).astype(np.float32)
+    assert not any(v.check_barge_in(quiet) for _ in range(40))
+
+
+def test_reset_barge_in_clears_accumulation():
+    from core.vad import VAD
+
+    v = VAD()
+    v.check_barge_in((np.random.default_rng(9).standard_normal(480) * 0.5).astype(np.float32))
+    v.reset_barge_in()
+    assert len(v._barge_buffer) == 0 and v._barge_hits == 0

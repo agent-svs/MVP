@@ -163,6 +163,13 @@ _SERVICES = [
     "cardiology", "dermatology", "pediatrics", "paediatrics", "orthopedics",
     "orthopaedics", "neurology", "ophthalmology", "psychiatry",
     "gastroenterology", "gynecology", "gynaecology", "ent",
+    # Practitioner nouns — callers routinely name the doctor, not the
+    # specialty ("change it to cardiologist"). The entity store maps these
+    # onto the canonical service.
+    "cardiologist", "dermatologist", "pediatrician", "paediatrician",
+    "orthopedist", "orthopaedist", "neurologist", "ophthalmologist",
+    "optometrist", "psychiatrist", "psychologist", "gastroenterologist",
+    "gynecologist", "gynaecologist", "dentist", "dentistry",
 ]
 # Precompiled longest-first so "dental checkup" wins over "dental".
 _SERVICE_RES = [

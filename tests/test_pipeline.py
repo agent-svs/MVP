@@ -202,3 +202,38 @@ def test_speak_mutes_before_synthesising(pipeline):
     )[1]
     pipeline._speak("Hello")
     assert order[:2] == ["mute", "synthesize"]
+
+
+def test_end_of_conversation_resets_state_for_the_next_caller(pipeline, monkeypatch):
+    """The flag was logged and otherwise ignored, so the next caller inherited
+    the previous caller's intent and slots."""
+    import core.pipeline as pipeline_mod
+
+    pipeline.dst.process_turn.return_value = _nlu(
+        intent="goodbye", _active_intent="goodbye", state="done", missing_slots=[]
+    )
+    monkeypatch.setattr(pipeline_mod.VoicePipeline, "_speak_with_barge_in", lambda self, t: None)
+
+    pipeline._process_one_turn()
+
+    assert pipeline.dst.reset.called
+    assert pipeline.llm.clear_history.called
+    assert pipeline._last_response == ""
+
+
+def test_monitor_drains_the_whole_backlog_each_pass(pipeline):
+    """Reading one chunk per 50ms could not keep up with 30ms frames, so the
+    queue overflowed continuously."""
+    chunks = [np.zeros(480, dtype=np.float32) for _ in range(6)] + [None]
+    pipeline.audio_in.read_chunk.side_effect = lambda **kw: chunks.pop(0) if chunks else None
+    pipeline.vad.check_barge_in.return_value = False
+    pipeline._speaking.set()
+
+    t = threading.Thread(target=pipeline._barge_in_monitor, daemon=True)
+    t.start()
+    import time as _t
+    _t.sleep(0.2)
+    pipeline._speaking.clear()
+    t.join(timeout=1.0)
+
+    assert pipeline.audio_in.read_chunk.call_count >= 6

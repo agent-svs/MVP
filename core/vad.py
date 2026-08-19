@@ -49,6 +49,11 @@ class VAD:
         self._speech_chunks = 0
         self._audio_buffer = np.array([], dtype=np.float32)
         self._last_speech_prob = 0.0
+        # Barge-in works on its own buffer: mic chunks (480 samples at
+        # 30ms) are SHORTER than the Silero window (512), so a per-call
+        # length check rejected every chunk and barge-in never fired.
+        self._barge_buffer = np.array([], dtype=np.float32)
+        self._barge_hits = 0
         # Pre-roll so the first phoneme isn't clipped off the utterance.
         self._preroll_chunks = max(1, int(0.2 * self.sample_rate / self._vad_chunk_size))
         self._preroll: list[np.ndarray] = []
@@ -74,6 +79,8 @@ class VAD:
             self._silence_chunks = 0
             self._speech_chunks = 0
             self._audio_buffer = np.array([], dtype=np.float32)
+            self._barge_buffer = np.array([], dtype=np.float32)
+            self._barge_hits = 0
             try:
                 self._model.reset_states()
             except Exception as e:
@@ -153,37 +160,45 @@ class VAD:
         acoustic echo does not reach. (This is only meaningful because AGC no
         longer runs per chunk — absolute amplitude is now trustworthy.)
         """
-        if audio_chunk is None or len(audio_chunk) < self._vad_chunk_size:
+        if audio_chunk is None or len(audio_chunk) == 0:
             return False
 
         needed = consecutive if consecutive is not None else cfg.vad.barge_in_consecutive
         floor = cfg.vad.barge_in_min_amplitude
         prob_floor = cfg.vad.barge_in_threshold
 
-        # Cheap rejection first: if nothing in this chunk is loud enough to be
-        # a person talking over the speaker, skip the model entirely.
-        if float(np.max(np.abs(audio_chunk))) < floor:
-            return False
-
         with self._lock:
-            hits = 0
-            n = len(audio_chunk) // self._vad_chunk_size
-            for i in range(n):
-                window = audio_chunk[i * self._vad_chunk_size:(i + 1) * self._vad_chunk_size]
-                loud = float(np.max(np.abs(window))) >= floor
+            self._barge_buffer = np.concatenate([self._barge_buffer, audio_chunk])
+            while len(self._barge_buffer) >= self._vad_chunk_size:
+                window = self._barge_buffer[: self._vad_chunk_size]
+                self._barge_buffer = self._barge_buffer[self._vad_chunk_size:]
+
+                peak = float(np.max(np.abs(window)))
+                if peak < floor:
+                    # Too quiet to be someone talking over the speaker.
+                    self._barge_hits = 0
+                    continue
+
                 prob = self._speech_prob(window)
                 self._last_speech_prob = prob
-                if loud and prob >= prob_floor:
-                    hits += 1
-                    if hits >= needed:
+                if prob >= prob_floor:
+                    self._barge_hits += 1
+                    if self._barge_hits >= needed:
                         logger.info(
-                            f"Barge-in confirmed: prob={prob:.2f} "
-                            f"peak={float(np.max(np.abs(window))):.3f}"
+                            f"Barge-in confirmed: prob={prob:.2f} peak={peak:.3f}"
                         )
+                        self._barge_hits = 0
+                        self._barge_buffer = np.array([], dtype=np.float32)
                         return True
                 else:
-                    hits = 0
+                    self._barge_hits = 0
             return False
+
+    def reset_barge_in(self) -> None:
+        """Clear barge-in accumulation between utterances."""
+        with self._lock:
+            self._barge_buffer = np.array([], dtype=np.float32)
+            self._barge_hits = 0
 
     @property
     def is_speaking(self) -> bool:

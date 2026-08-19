@@ -213,3 +213,167 @@ def test_canonical_resolution_rescues_an_over_extended_span(joint_dst):
     r = dst.process_turn("I want to book a checkup", joint_nlu_engine=engine)
     assert r["slots"].get("service_type") == "General Checkup"
     assert "service_type" not in r["missing_slots"]
+
+
+# ── the destroyed-booking regression ────────────────────────
+def test_garbled_utterance_cannot_destroy_an_in_flight_booking(joint_dst):
+    """A misheard word ("concentration") was classified as services_available.
+    Because that intent has no required slots, the DST wiped the caller's
+    date, time and name and the booking was unrecoverable."""
+    dst, engine = joint_dst
+    engine.queue("book_appointment", slots={
+        "service_type": slot("General Checkup"), "date": slot("2026-08-24"),
+        "time": slot("15:00"), "patient_name": slot("Jita"),
+    })
+    dst.process_turn("book a checkup", joint_nlu_engine=engine)
+
+    engine.queue("services_available", confidence=0.9)
+    r = dst.process_turn("concentration.", joint_nlu_engine=engine)
+
+    assert r["_active_intent"] == "book_appointment"
+    for key in ("date", "time", "patient_name"):
+        assert key in r["slots"], f"{key} was discarded"
+
+
+def test_a_real_question_may_still_take_over(joint_dst):
+    dst, engine = joint_dst
+    engine.queue("book_appointment", slots={"date": slot("2026-08-24")})
+    dst.process_turn("book me in", joint_nlu_engine=engine)
+
+    engine.queue("services_available", confidence=0.9)
+    r = dst.process_turn("what services do you offer", joint_nlu_engine=engine)
+    assert r["_active_intent"] == "services_available"
+
+
+def test_slots_survive_a_topic_switch(joint_dst):
+    """Slot values stay valid across a detour, so the caller can come back."""
+    dst, engine = joint_dst
+    engine.queue("book_appointment", slots={
+        "date": slot("2026-08-24"), "patient_name": slot("Jita"),
+    })
+    dst.process_turn("book me in", joint_nlu_engine=engine)
+
+    engine.queue("clinic_hours", confidence=0.95)
+    r = dst.process_turn("what time do you open", joint_nlu_engine=engine)
+    assert r["slots"].get("patient_name") == "Jita"
+    assert r["slots"].get("date") == "2026-08-24"
+
+
+def test_repeat_only_fires_on_an_actual_repeat_request(joint_dst):
+    """"Go with consultation." was labelled repeat and replayed the previous
+    response instead of being treated as an answer."""
+    dst, engine = joint_dst
+    engine.queue("repeat", confidence=0.9)
+    r = dst.process_turn("Go with consultation.", joint_nlu_engine=engine)
+    assert r["intent"] != "repeat"
+
+    for phrase in ("sorry, say that again", "pardon?", "could you repeat that",
+                   "what?", "one more time"):
+        engine.queue("repeat", confidence=0.9)
+        assert dst.process_turn(phrase, joint_nlu_engine=engine)["intent"] == "repeat", phrase
+
+
+# ── change_* must carry a new value ─────────────────────────
+def test_change_intent_recovers_the_value_the_tagger_missed(joint_dst):
+    """The tagger reads "change it to cardiologist" as change_service but under
+    some contexts emits no span. The old value then survived and the agent
+    offered to change the service to what it already was."""
+    dst, engine = joint_dst
+    engine.queue("book_appointment", slots={
+        "service_type": slot("General Checkup"), "date": slot("2026-08-24"),
+        "time": slot("15:00"), "patient_name": slot("Jita"),
+    })
+    dst.process_turn("book a checkup", joint_nlu_engine=engine)
+
+    engine.queue("change_service", slots={})  # tagger emits nothing
+    r = dst.process_turn("change it to cardiologist.", joint_nlu_engine=engine)
+    assert r["slots"]["service_type"] == "Cardiology"
+
+
+def test_change_intent_with_no_value_asks_instead_of_echoing(joint_dst):
+    dst, engine = joint_dst
+    engine.queue("book_appointment", slots={"service_type": slot("General Checkup")})
+    dst.process_turn("book a checkup", joint_nlu_engine=engine)
+
+    engine.queue("change_service", slots={})
+    r = dst.process_turn("actually, change it", joint_nlu_engine=engine)
+    assert "service_type" in r["missing_slots"]
+    assert r["slots"].get("service_type") is None
+
+
+@pytest.mark.parametrize("slot_name,text,expected", [
+    ("service_type", "change it to cardiologist", "Cardiology"),
+    ("service_type", "switch to a dentist", "Dental"),
+    ("time", "make it 4pm", "16:00"),
+])
+def test_raw_text_recovery(slot_name, text, expected):
+    got = DialogueStateTracker._recover_slot_from_text(slot_name, text)
+    assert got is not None and got["value"] == expected
+
+
+# ── slot acceptance under an explicit expectation ───────────
+def test_expected_slot_accepted_at_a_lower_confidence(joint_dst):
+    """Unusual names tokenise badly — "Jita" scored 0.57-0.69, under the
+    general 0.75 bar, so the agent kept re-asking for a name it had heard."""
+    from config import cfg
+
+    dst, engine = joint_dst
+    dst.intent = "book_appointment"
+    dst.state = State.COLLECTING
+    dst.set_expectation("patient_name", "And what name is the appointment under?")
+
+    engine.queue(None, slots={"patient_name": slot("Jita", 0.62)})
+    r = dst.process_turn("The appointment is under the name Jita.", joint_nlu_engine=engine)
+
+    assert cfg.nlu.slot_confidence_pending < 0.62 < cfg.nlu.slot_confidence_threshold
+    assert r["slots"].get("patient_name") == "Jita"
+    assert dst.pending_slot is None, "expectation must clear once satisfied"
+
+
+def test_unexpected_slot_still_needs_the_full_bar(joint_dst):
+    dst, engine = joint_dst
+    engine.queue("book_appointment", slots={"patient_name": slot("Mumble", 0.5)})
+    r = dst.process_turn("book me in", joint_nlu_engine=engine)
+    assert "patient_name" not in r["slots"]
+
+
+# ── task switching needs evidence ───────────────────────────
+def test_switch_between_tasks_requires_a_cue_for_the_new_task(joint_dst):
+    """"change it to cardiologist" was read as update_contact_info at 0.86
+    confidence and replaced the live booking."""
+    dst, engine = joint_dst
+    engine.queue("book_appointment", slots={
+        "service_type": slot("General Checkup"), "date": slot("2026-08-24"),
+        "time": slot("15:00"),
+    })
+    dst.process_turn("book a checkup", joint_nlu_engine=engine)
+
+    engine.queue("update_contact_info", confidence=0.86)
+    r = dst.process_turn("change it to cardiologist.", joint_nlu_engine=engine)
+    assert r["_active_intent"] == "book_appointment"
+
+
+def test_a_cued_task_switch_is_allowed(joint_dst):
+    dst, engine = joint_dst
+    engine.queue("book_appointment", slots={"date": slot("2026-08-24")})
+    dst.process_turn("book me in", joint_nlu_engine=engine)
+
+    engine.queue("cancel_appointment", confidence=0.9)
+    r = dst.process_turn("actually cancel it instead", joint_nlu_engine=engine)
+    assert r["_active_intent"] == "cancel_appointment"
+
+
+def test_correction_phrase_recovers_a_slot_the_tagger_dropped(joint_dst):
+    """The tagger emits no span for "change it to cardiologist" under some
+    contexts; the deterministic extractors do not have that failure mode."""
+    dst, engine = joint_dst
+    engine.queue("book_appointment", slots={
+        "service_type": slot("General Checkup"), "date": slot("2026-08-24"),
+        "time": slot("15:00"), "patient_name": slot("Jita"),
+    })
+    dst.process_turn("book a checkup", joint_nlu_engine=engine)
+
+    engine.queue("update_contact_info", confidence=0.86, slots={})
+    r = dst.process_turn("change it to cardiologist.", joint_nlu_engine=engine)
+    assert r["slots"]["service_type"] == "Cardiology"
+    assert r["_active_intent"] == "book_appointment"

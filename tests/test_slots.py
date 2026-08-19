@@ -121,3 +121,13 @@ def test_phone_extraction(text, expected):
 
 def test_phone_rejects_short_numbers():
     assert _extract_phone("my number is 1234567") is None
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("change it to cardiologist", "cardiologist"),
+    ("I need a dentist", "dentist"),
+    ("book me with a neurologist", "neurologist"),
+])
+def test_practitioner_nouns_are_extractable(text, expected):
+    """Callers name the doctor, not the specialty."""
+    assert _extract_service(text)[0] == expected

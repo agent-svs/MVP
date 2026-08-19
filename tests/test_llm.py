@@ -100,3 +100,11 @@ def test_history_is_trimmed():
         llm._history.append({"role": "user", "parts": [{"text": str(i)}]})
     llm._trim_history()
     assert llm.history_length <= 12
+
+
+def test_prompt_states_the_agent_can_book():
+    """Grounding made it over-refuse: it told a caller "I don't have the
+    ability to book appointments directly" mid-booking."""
+    prompt = build_system_prompt()
+    assert "CAN book" in prompt
+    assert "Never tell a caller you are unable to book" in prompt

@@ -1,0 +1,99 @@
+First, the measured facts (not guesses)
+
+- Brain = DeBERTa-v3-base, ~184M params (768 hidden × 12 layers), fine-tuned on 3,252 examples, 30 fixed intents, 13 slot tags.
+- Model quality: validation intent accuracy 98.7%, slot F1 94.5%, joint_f1 0.97. But — this is on a held-out slice of the same synthetic template distribution it trained on. That number measures "did it memorize my data's shape," not "does it understand people."
+- Data: 2,940 unique utterances, 2,511 unique word types. Decently varied on the surface (not trivially templated), but tiny — real clinic English is 10–50× that vocabulary, and this is synthetic, not real call transcripts.
+- Grounding: there is no RAG (Router "Path D = RAG+LLM" calls the LLM with zero retrieval — verified; no vector store or embeddings anywhere in requirements.txt). There is no backend — get_action_response returns template strings, entity_store is 3 hardcoded doctors, no DB/calendar/patient records exist. A "booking" is a sentence, not a transaction.
+
+The scorecard (out of 10)
+
+┌─────────────────────────┬─────┬───────────────────┬───────────────────────────────────────────────────────────────────────┐
+│         Aspect          │ Now │ Ceiling of this   │                                  Why                                  │
+│                         │     │   architecture    │                                                                       │
+├─────────────────────────┼─────┼───────────────────┼───────────────────────────────────────────────────────────────────────┤
+│ Code / engineering      │ 7   │ 8                 │ Genuinely well-structured: modular, typed config, tests, guardrail    │
+│ quality                 │     │                   │ layer, caching, streaming TTS. This part is real.                     │
+├─────────────────────────┼─────┼───────────────────┼───────────────────────────────────────────────────────────────────────┤
+│ In-domain NLU accuracy  │ 7   │ 8                 │ Strong on its own distribution. Unknown on real speech — never        │
+│                         │     │                   │ measured on real data.                                                │
+├─────────────────────────┼─────┼───────────────────┼───────────────────────────────────────────────────────────────────────┤
+│                         │     │                   │ Turn-based VAD (fixed 700ms silence wait) + Whisper + serial cascade  │
+│ Speed / latency         │ 3   │ 5                 │ + XTTS-v2 on CPU (not real-time — established fact). Cannot hit human │
+│                         │     │                   │  turn-taking. Needs a real benchmark.                                 │
+├─────────────────────────┼─────┼───────────────────┼───────────────────────────────────────────────────────────────────────┤
+│ Context / memory        │ 3   │ 4                 │ Model sees only the previous system turn. No long-term memory, no     │
+│                         │     │                   │ user/session memory, no cross-topic recall.                           │
+├─────────────────────────┼─────┼───────────────────┼───────────────────────────────────────────────────────────────────────┤
+│ Generalization /        │     │                   │ This is the wall. A closed 30-intent classifier cannot by definition  │
+│ "understanding the      │ 2   │ 3                 │ handle unenumerated scenarios. Everything new → out_of_domain.        │
+│ unseen"                 │     │                   │                                                                       │
+├─────────────────────────┼─────┼───────────────────┼───────────────────────────────────────────────────────────────────────┤
+│ Human-feel /            │ 3   │ 4                 │ Canned templates + rigid FSM. Polished templates still sound like     │
+│ naturalness             │     │                   │ templates.                                                            │
+├─────────────────────────┼─────┼───────────────────┼───────────────────────────────────────────────────────────────────────┤
+│                         │     │                   │ Guardrails catch a few things (past dates, unregistered doctors). The │
+│ Hallucination safety    │ 4   │ 5                 │  LLM is ungrounded — it can invent availability, fees, policies       │
+│                         │     │                   │ freely.                                                               │
+├─────────────────────────┼─────┼───────────────────┼───────────────────────────────────────────────────────────────────────┤
+│ Enterprise readiness    │ 2   │ 3                 │ No backend, DB, calendar, auth, telephony, observability, or scale    │
+│                         │     │                   │ story. It's a strong demo, not a product.                             │
+├─────────────────────────┼─────┼───────────────────┼───────────────────────────────────────────────────────────────────────┤
+│ "Brain" strength vs     │ 3   │ 4                 │ Intent-classifier + FSM is a ~2019 Rasa-era design. It is             │
+│ market                  │     │                   │ structurally behind the market, not ahead.                            │
+└─────────────────────────┴─────┴───────────────────┴───────────────────────────────────────────────────────────────────────┘
+
+The one thing you're missing (the core contradiction)
+
+You said: "I can't enumerate every scenario, I want it smart enough to understand."
+
+That is exactly, definitionally, the thing an intent classifier cannot do. A fine-tuned 30-class model works by mapping inputs to a closed, pre-enumerated set. Its whole nature is enumeration. You are asking a lookup-table architecture to do open-world reasoning. No amount of retraining fixes this — it's the design, not the weights.
+
+Open-world understanding, generalizing to the 10,000 unseen scenarios, that specific capability is what LLMs have and classifiers don't. So the strategic error isn't in your code — your code is good — it's that the brain is the wrong organ for the job you're describing. Today the LLM (the actual reasoning engine) is a fallback that only fires on low confidence. You have it backwards.
+
+The blockers, ranked
+
+1. Closed-world NLU is the brain. (generalization, human-feel) → hard ceiling at ~3/10 for "understanding."
+2. Rigid FSM DST. Linear slot-filling; can't do multi-intent, topic-switching, nesting, or "actually never mind, different question." Real conversation isn't a state machine.
+3. Ungrounded generation. No tools, no RAG, no backend → factual hallucination is guaranteed the moment a caller asks anything the system prompt doesn't contain. You cannot promise "no hallucination" without grounding.
+4. No real state/backend. Nothing is actually booked, checked, or remembered. This is the gap between demo and product.
+5. Latency architecture. Fixed-silence endpointing + CPU XTTS + serial cascade. Humans reply in ~300–500ms; this pipeline can't structurally get there without re-architecting the I/O.
+6. Evaluation blindness. Every metric is in-distribution synthetic. No real-conversation eval, no hallucination eval, no latency benchmark. You're flying blind on the exact axes you care about.
+
+What SOTA actually is right now (so you know the bar)
+
+(Industry-state as of my knowledge — verify current versions when you build.)
+- Brain = an LLM with function/tool calling, grounded to real systems. The LLM is the dialogue manager. No intent taxonomy.
+- Grounding = tools + RAG, with a "cite-or-refuse" contract: the model may only state facts it retrieved from a tool. That's how top voice agents don't hallucinate.
+- Latency: either speech-to-speech realtime models (Gemini Live, GPT realtime, ~300ms) or a tight cascade with streaming ASR (Deepgram / streaming Whisper) + sub-100ms TTS (ElevenLabs Flash, Cartesia Sonic) + semantic endpointing (not fixed silence).
+- Orchestration: LiveKit Agents / Pipecat / Vapi / Retell handle the plumbing.
+
+Your current design predates all of this. The good news: the scaffolding you built (guardrails, config, component boundaries, logging) is exactly what these architectures also need.
+
+How to actually get there — the reframe
+
+Don't throw away the fine-tuned model. Demote it. It's fast and structured — perfect for the jobs intelligence shouldn't do:
+
+New architecture — LLM-brain, model-as-reflexes, grounded-by-tools:
+
+1. LLM is the dialogue manager, always on (not a fallback). It reasons over the conversation, decides what to do, asks when unsure, and generates every response. This single change moves "understanding" from 3/10 toward 7–8.
+2. The joint DeBERTa model becomes a fast sidecar: real-time intent/slot hints + a confidence/uncertainty signal the LLM and router consume, plus a cheap fast-path for the 20 dead-obvious utterances (greeting, yes/no) so you don't pay LLM latency on them. This is a genuinely smart hybrid — you keep your speed and get generalization.
+3. Ground everything with tools. Real functions: check_availability(doctor, date), book(...), lookup_patient(...), get_policy(topic). The LLM may not state a fact it didn't get from a tool. No tool result → it says "let me check / I don't have that." This is how you kill hallucination — architecturally, not with regex guardrails.
+4. Replace the FSM with an LLM-driven policy: the required-slots logic becomes a checklist the LLM fills via tools, but it can handle detours, multi-intent, and corrections natively.
+5. Fix latency as a system: streaming ASR (incremental, no 700ms wait — use semantic endpointing), a faster TTS than CPU-XTTS, and run STT-partial → NLU → tool-prefetch speculatively in parallel while the user is still finishing.
+
+New possibilities (the "something new / better than market" angle)
+
+The market's LLM-agents are slow (LLM in every turn) and sometimes hallucinate (weak grounding contracts). Your edge is not a better intent model — it's here:
+
+- Reflex + reason dual-brain: your fast joint model answers the ~40% trivial turns in <150ms and also produces a calibrated confidence that decides "reflex vs think." Most competitors pay full LLM latency every turn — you wouldn't. This is a real, defensible latency win.
+- Uncertainty-aware = "sense of understanding": fuse the joint model's confidence + the LLM's own token logprobs + tool-result presence into an explicit "do I actually know this?" score. When it's low, the agent asks a clarifying question instead of bluffing. That single behavior is what makes it feel like it understands rather than pattern-matches.
+- The data flywheel is your answer to "I can't enumerate scenarios": you're already logging every turn to nlu_data.jsonl. Turn that into a loop — mine the real failures/low-confidence turns, auto-label with the LLM, active-learning-retrain the fast model monthly. You don't enumerate scenarios; you harvest them from real traffic. In a year the reflex model covers your real distribution, not a synthetic one.
+- Grounded "cite-or-refuse" as a product guarantee — a voice agent that provably never invents a fact is genuinely differentiated in healthcare/enterprise.
+
+Bottom line
+
+- Where you are: a well-engineered ~2019-architecture task-bot. Demo-grade. ~3/10 on the specific axes you care about most (understanding, human-feel, no-hallucination), because the brain is a closed-set classifier and there's no grounding or backend.
+- How far from your goal: the scaffolding is 70% there; the brain and grounding are a re-architecture, not a tune-up. Realistically a few focused weeks to a strong grounded LLM-agent prototype, longer to enterprise-hardened.
+- The mindset shift: stop trying to make the classifier smart. Make the LLM the brain, the classifier the reflexes, tools the source of truth, and real traffic your training data. That's the only path to "understands anything, feels human, never hallucinates" — and the reflex+uncertainty hybrid is where you can genuinely beat what's on the market.
+
+Want me to (a) build a latency benchmark so we replace my "slow" judgment with real numbers, (b) prototype the LLM-brain + tool-calling loop alongside the existing pipeline so you can A/B them, or (c) design the grounding/tool layer + fake backend first? I'd recommend (a) then (b).

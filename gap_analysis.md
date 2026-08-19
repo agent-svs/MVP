@@ -1,3 +1,13 @@
+> [!CAUTION]
+> **STALE — superseded.** This document describes an earlier build in which the
+> NLU was regex-based and barge-in was missing. Both were replaced: intent and
+> slots now come from a fine-tuned joint DeBERTa model (`core/nlu/joint_nlu.py`)
+> and barge-in is implemented in `core/pipeline.py`. Treat the layer-by-layer
+> scores below as historical. See `README.md` for the current architecture and
+> `claudeIMPRo.txt` for the current strategic assessment.
+
+---
+
 # Reference Architecture vs Implementation Gap Analysis
 
 > [!NOTE]

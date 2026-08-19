@@ -1,85 +1,71 @@
-"""
-Tests for Guardrails — PII, Business Rules, Length Cap.
-"""
+"""Guardrails — response sanitisation only."""
 
-from datetime import datetime, timedelta
+from __future__ import annotations
 
+import pytest
 
-def test_pii_detects_ssn():
-    from core.guardrails import check_pii
-    issues = check_pii("Your SSN is 123-45-6789")
-    assert any("SSN" in i for i in issues)
+from core.guardrails import (
+    apply_guardrails, cap_response_length, check_pii, clean_for_speech, scrub_pii,
+)
 
 
-def test_pii_detects_credit_card():
-    from core.guardrails import check_pii
-    issues = check_pii("Card: 4111-2222-3333-4444")
-    assert any("credit card" in i for i in issues)
+# ── the deadlock regression ─────────────────────────────────
+def test_business_rules_no_longer_block_a_clarification():
+    """A weekend date in slots used to replace the agent's question with a
+    refusal, so the caller could never correct it. Guardrails must not care."""
+    r = apply_guardrails("What time works best for you?",
+                         {"date": "2026-08-22", "time": "15:00"})
+    assert r.passed is True
+    assert r.text == "What time works best for you?"
 
 
-def test_pii_clean_text():
-    from core.guardrails import check_pii
-    issues = check_pii("Your appointment is at 3 PM")
-    assert issues == []
+def test_unknown_doctor_does_not_block_the_response():
+    r = apply_guardrails("Which doctor would you like?", {"doctor_name": "Dr. Pastor"})
+    assert r.passed is True
 
 
-def test_scrub_pii():
-    from core.guardrails import scrub_pii
-    result = scrub_pii("SSN: 123-45-6789 is private")
-    assert "123-45-6789" not in result
-    assert "[REDACTED]" in result
+def test_doctor_named_pastor_does_not_trip_a_past_keyword():
+    r = apply_guardrails("Dr. Pastor is not one of our doctors.", {})
+    assert r.passed is True
 
 
-def test_validate_date_past():
-    from core.guardrails import validate_date
-    yesterday = (datetime.now().date() - timedelta(days=1)).isoformat()
-    issues = validate_date(yesterday)
-    assert any("past" in i.lower() for i in issues)
+# ── PII ─────────────────────────────────────────────────────
+@pytest.mark.parametrize("text,label", [
+    ("Your SSN is 123-45-6789", "SSN"),
+    ("Card 4111 2222 3333 4444", "credit card number"),
+    ("Email me at a.b@example.com", "email address"),
+    ("MRN: 99AB2231", "record number"),
+    ("DOB: 01/02/1988", "date of birth"),
+])
+def test_pii_detected_and_redacted(text, label):
+    assert label in check_pii(text)
+    assert "[redacted]" in scrub_pii(text)
+    r = apply_guardrails(text)
+    assert "[redacted]" in r.text and r.redactions
 
 
-def test_validate_date_future():
-    from core.guardrails import validate_date
-    # Use next Monday (always a weekday)
-    today = datetime.now().date()
-    days_ahead = 7 - today.weekday()  # next Monday
-    if days_ahead <= 0:
-        days_ahead += 7
-    next_monday = (today + timedelta(days=days_ahead)).isoformat()
-    issues = validate_date(next_monday)
-    assert not any("past" in i.lower() for i in issues)
+def test_clean_text_passes_untouched():
+    r = apply_guardrails("Your appointment is confirmed.")
+    assert r.passed and r.warnings == [] and r.text == "Your appointment is confirmed."
 
 
-def test_validate_time_outside_hours():
-    from core.guardrails import validate_time
-    issues = validate_time("22:00")
-    assert any("outside" in i.lower() for i in issues)
+# ── speech shaping ──────────────────────────────────────────
+def test_markdown_stripped_for_speech():
+    assert "*" not in clean_for_speech("Your **appointment** is `confirmed`")
 
 
-def test_validate_time_within_hours():
-    from core.guardrails import validate_time
-    issues = validate_time("14:00")
-    assert issues == []
+def test_length_capped():
+    assert cap_response_length("Hello there.") == "Hello there."
+    assert len(cap_response_length("A" * 600)) <= 501
 
 
-def test_cap_response_length():
-    from core.guardrails import cap_response_length
-    short = "Hello there."
-    assert cap_response_length(short) == short
-
-    long = "A" * 600
-    result = cap_response_length(long)
-    assert len(result) <= 501  # 500 + possible period
+def test_empty_response_is_blocked_with_a_recovery_line():
+    r = apply_guardrails("")
+    assert r.passed is False and r.text
 
 
-def test_apply_guardrails_clean():
-    from core.guardrails import apply_guardrails
-    result = apply_guardrails("Your appointment is confirmed.")
-    assert result.passed is True
-    assert result.warnings == []
-
-
-def test_apply_guardrails_pii():
-    from core.guardrails import apply_guardrails
-    result = apply_guardrails("Your SSN is 123-45-6789")
-    assert "REDACTED" in result.text
-    assert len(result.warnings) > 0
+def test_legacy_validate_helpers_still_work():
+    from core.guardrails import validate_date, validate_time
+    assert validate_date("2020-01-01")
+    assert validate_time("23:00")
+    assert validate_time("14:00") == []

@@ -1,112 +1,84 @@
 """
-Confidence Scorer (v2 — ML-calibrated)
+Confidence Scorer.
 
-Combines DeBERTa intent confidence with slot fill percentage
-to produce an overall NLU confidence score.
+Combines the intent classifier's probability with slot completeness into one
+routing score.
 
-Since DeBERTa v3 outputs well-calibrated probabilities (unlike regex),
-intent confidence gets higher weight (70%) and slot fill gets lower (30%).
-
-Thresholds adjusted for ML:
-  - NLU_CONFIDENCE_HIGH (0.80): Path A (direct action)
-  - NLU_CONFIDENCE_LOW (0.50): below this → Path C (LLM fallback)
+Two fixes over the previous version:
+  * `pending_slot` is now actually threaded through from the router, so the
+    context boost is live rather than dead code.
+  * Intents with no required slots no longer receive the full slot weight for
+    free. That gave `out_of_domain` at 0.0 intent confidence a floor of 0.30
+    and made the score meaningless for exactly the case it should flag.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from config import cfg
+from core.nlu.dst import REQUIRED_SLOTS
 
 logger = logging.getLogger(__name__)
 
-# Required slots per intent (mirrors DST — 27-label set)
-REQUIRED_SLOTS = {
-    "book_appointment": ["service_type", "date", "time", "name"],
-    "cancel_appointment": ["name"],
-    "reschedule_appointment": ["date", "time"],
-    "check_appointment_status": ["name"],
-    "check_my_appointments": ["name"],
-    "change_date": ["date"],
-    "change_doctor": ["doctor_name"],
-    "change_service": ["service_type"],
-    "register_new_patient": ["name", "phone"],
-    "update_contact_info": ["name", "phone"],
-    "verify_patient_identity": ["name"],
-    "confirm_appointment": [],
-}
-
-# Weight split — DeBERTa scores are well-calibrated, give them more weight
 INTENT_WEIGHT = 0.70
 SLOT_WEIGHT = 0.30
+
+# Intents that legitimately carry no slots — their confidence is entirely the
+# classifier's. Anything else with no required slots gets its slot component
+# scaled by the intent confidence rather than granted outright.
+_SLOTLESS_INTENTS = frozenset({
+    "greeting", "goodbye", "help", "repeat", "confirmation", "denial",
+    "complaint", "transfer_to_human", "emergency_request",
+    "clinic_hours", "clinic_location", "consultation_fee",
+    "doctor_specialization", "services_available", "doctor_availability",
+})
+
+
+def _is_filled(v: Any) -> bool:
+    if isinstance(v, dict):
+        v = v.get("value")
+    return v is not None and str(v).strip() != ""
 
 
 def compute_confidence(
     intent: str,
     intent_confidence: float,
     slots: dict[str, Any],
-    pending_slot: str | None = None,
+    pending_slot: Optional[str] = None,
 ) -> float:
-    """
-    Compute overall NLU confidence score.
-
-    Combines:
-    - Intent classifier confidence (70% weight) — DeBERTa is well-calibrated
-    - Slot fill percentage (30% weight)
-    - Context-weighting: Boost if pending_slot is filled
-
-    Args:
-        intent: Classified intent name
-        intent_confidence: Raw DeBERTa confidence (0.0-1.0)
-        slots: Currently filled slots
-        pending_slot: The slot the system is actively waiting for
-
-    Returns:
-        Overall confidence score (0.0-1.0)
-    """
-    # Intent weight: 70%
+    """Compute the overall NLU confidence for a turn (0.0-1.0)."""
+    intent_confidence = max(0.0, min(1.0, float(intent_confidence or 0.0)))
     intent_score = intent_confidence * INTENT_WEIGHT
 
-    # Slot fill weight: 30%
-    if intent in REQUIRED_SLOTS:
-        required = REQUIRED_SLOTS[intent]
-        if required:
-            filled = sum(1 for s in required if s in slots)
-            slot_score = (filled / len(required)) * SLOT_WEIGHT
-        else:
-            slot_score = SLOT_WEIGHT  # No slots required = full slot score
-    else:
-        # Intents without required slots (greeting, goodbye, faq, complaint)
+    required = REQUIRED_SLOTS.get(intent)
+    if required:
+        filled = sum(1 for s in required if _is_filled(slots.get(s)))
+        slot_score = (filled / len(required)) * SLOT_WEIGHT
+    elif intent in _SLOTLESS_INTENTS:
         slot_score = SLOT_WEIGHT
+    else:
+        # Unknown / out_of_domain: no free floor.
+        slot_score = intent_confidence * SLOT_WEIGHT
 
     overall = intent_score + slot_score
-    
-    # Context-weighted boost
-    if pending_slot and pending_slot in slots:
-        boost = 0.15
-        overall = min(1.0, overall + boost)
-        logger.debug(f"Confidence boost! pending_slot '{pending_slot}' filled (+{boost})")
+
+    if pending_slot and _is_filled(slots.get(pending_slot)):
+        overall = min(1.0, overall + 0.15)
+        logger.debug(f"Confidence boost: pending_slot '{pending_slot}' filled (+0.15)")
 
     logger.debug(
-        f"Confidence: intent={intent_confidence:.2f}×{INTENT_WEIGHT}={intent_score:.2f} "
+        f"Confidence: intent={intent_confidence:.2f}*{INTENT_WEIGHT}={intent_score:.2f} "
         f"+ slots={slot_score:.2f} = {overall:.2f}"
     )
     return overall
 
 
 def confidence_level(score: float) -> str:
-    """
-    Categorize confidence score into a routing level.
-
-    Thresholds (ML-calibrated):
-    - high:   >= 0.80 (was 0.85 for regex)
-    - medium: >= 0.50 (was 0.60 for regex)
-    - low:    < 0.50
-
-    Returns: "high", "medium", or "low"
-    """
+    """Categorise a score into high / medium / low."""
     if score >= cfg.nlu.confidence_high:
         return "high"
-    elif score >= cfg.nlu.confidence_low:
+    if score >= cfg.nlu.confidence_low:
         return "medium"
-    else:
-        return "low"
+    return "low"

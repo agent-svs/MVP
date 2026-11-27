@@ -1,7 +1,7 @@
 """
 Intent Classifier — DeBERTa v3 Zero-Shot / Fine-Tuned (v3)
 
-Classifies user utterances into 30 intents.
+Classifies user utterances into the intent set defined in INTENT_LABELS.
 
 Two modes:
   1. Zero-shot (default): Uses DeBERTa v3 xsmall NLI model, tests entailment
@@ -13,11 +13,8 @@ Model: Default = MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33 (22M params
 """
 
 import logging
-import os
 import re
 import time
-from typing import Optional
-
 from config import cfg
 
 logger = logging.getLogger(__name__)
@@ -31,7 +28,7 @@ _GREETING_PREFIX_RE = re.compile(
     re.IGNORECASE
 )
 
-# ── Intent Definitions (30-label set) ────────────────────────
+# ── Intent definitions ───────────────────────────────────────
 # Each intent has a label used for zero-shot classification
 # and a natural-language hypothesis template.
 # When fine-tuned, the hypothesis is not used — the model
@@ -108,12 +105,10 @@ def _load_model():
     if _classifier is not None:
         return
 
-    # Read configuration now that config.py has loaded .env
-    _model_name = os.getenv(
-        "INTENT_MODEL",
-        "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
-    )
-    _is_fine_tuned = os.getenv("INTENT_FINE_TUNED", "false").lower() == "true"
+    # Configuration comes from cfg, not raw os.getenv — these settings used to
+    # bypass the typed Config entirely and were absent from config.py.
+    _model_name = cfg.nlu.intent_model
+    _is_fine_tuned = cfg.nlu.intent_fine_tuned
     MIN_CONFIDENCE = cfg.nlu.confidence_low if _is_fine_tuned else 0.20
 
     from transformers import pipeline
@@ -125,7 +120,7 @@ def _load_model():
             "text-classification",
             model=_model_name,
             top_k=1,
-            device="cpu",
+            device=cfg.hf_pipeline_device,
         )
         elapsed = time.time() - t0
         logger.info(f"Fine-tuned intent classifier loaded in {elapsed:.1f}s")
@@ -136,7 +131,7 @@ def _load_model():
             "zero-shot-classification",
             model=_model_name,
             hypothesis_template=HYPOTHESIS_TEMPLATE,
-            device="cpu",
+            device=cfg.hf_pipeline_device,
         )
         elapsed = time.time() - t0
         logger.info(f"Zero-shot intent classifier loaded in {elapsed:.1f}s")
@@ -228,10 +223,10 @@ def classify_intent(text: str) -> tuple[str, float]:
 if __name__ == "__main__":
     import sys
     sys.path.insert(0, ".")
-    from config import cfg
     cfg.setup_logging()
 
     print("🧠 DeBERTa v3 Intent Classifier — Interactive Test")
+    _load_model()
     print(f"   Model: {_model_name}")
     print("   Type utterances to classify. Type 'quit' to exit.\n")
 

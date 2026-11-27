@@ -1,9 +1,16 @@
 """
-Audio Output — Speaker Playback Module
+Audio Output — speaker playback with real interruption.
 
-Plays audio through the system speakers using sounddevice.
-Supports streaming playback and mid-stream interruption (for barge-in).
+Uses a dedicated OutputStream and writes in small blocks, so `interrupt()`
+actually stops playback within one block (~20ms).
+
+The previous implementation used the module-level sd.play()/sd.wait()/sd.stop()
+helpers, which share one global stream. `interrupt()` called sd.stop() from a
+monitor thread while play() was blocked inside sd.wait() — a documented race —
+and the interrupt flag was only honoured in a code path nothing called.
 """
+
+from __future__ import annotations
 
 import logging
 import threading
@@ -16,87 +23,73 @@ from config import cfg
 
 logger = logging.getLogger(__name__)
 
+# Playback block size — small enough that a barge-in stops mid-word.
+_BLOCK = 1024
+
 
 class AudioOutput:
     """Play audio through the system speakers."""
 
-    def __init__(self, sample_rate: Optional[int] = None):
-        self.sample_rate = sample_rate or cfg.audio.sample_rate
+    def __init__(self, sample_rate: Optional[int] = None) -> None:
+        self.sample_rate = sample_rate if sample_rate is not None else cfg.audio.sample_rate
         self._playing = False
-        self._interrupt_flag = threading.Event()
+        self._interrupt = threading.Event()
+        self._lock = threading.Lock()
 
-    def play(self, audio: np.ndarray, sample_rate: Optional[int] = None) -> None:
-        """
-        Play an audio array through the speakers (blocking).
+    def play(self, audio: np.ndarray, sample_rate: Optional[int] = None) -> bool:
+        """Play an array (blocking). Returns True if it finished uninterrupted."""
+        if audio is None or len(audio) == 0:
+            return True
 
-        Args:
-            audio: numpy float32 array of audio samples
-            sample_rate: override sample rate, defaults to config
-        """
         sr = sample_rate or self.sample_rate
-        self._playing = True
-        self._interrupt_flag.clear()
+        data = np.asarray(audio, dtype=np.float32).reshape(-1, 1)
 
-        try:
-            logger.debug(f"Playing audio: {len(audio)} samples at {sr}Hz")
-            sd.play(audio, samplerate=sr)
-            sd.wait()
-        except Exception as e:
-            logger.error(f"Playback error: {e}")
-        finally:
-            self._playing = False
-
-    def play_streaming(
-        self, audio_chunks, sample_rate: Optional[int] = None
-    ) -> None:
-        """
-        Play audio chunks as they arrive (streaming playback).
-
-        Args:
-            audio_chunks: iterable of numpy float32 arrays
-            sample_rate: override sample rate, defaults to config
-        """
-        sr = sample_rate or self.sample_rate
-        self._playing = True
-        self._interrupt_flag.clear()
-
-        try:
-            for chunk in audio_chunks:
-                if self._interrupt_flag.is_set():
-                    logger.info("Playback interrupted (barge-in)")
-                    break
-                sd.play(chunk, samplerate=sr)
-                sd.wait()
-        except Exception as e:
-            logger.error(f"Streaming playback error: {e}")
-        finally:
-            self._playing = False
+        # Serialise playback so a filler and the main response never overlap.
+        with self._lock:
+            self._interrupt.clear()
+            self._playing = True
+            completed = True
+            stream = None
+            try:
+                stream = sd.OutputStream(
+                    samplerate=sr, channels=1, dtype="float32", blocksize=_BLOCK
+                )
+                stream.start()
+                for start in range(0, len(data), _BLOCK):
+                    if self._interrupt.is_set():
+                        completed = False
+                        logger.info("Playback interrupted (barge-in)")
+                        break
+                    stream.write(data[start:start + _BLOCK])
+            except Exception as e:
+                logger.error(f"Playback error: {e}")
+                completed = False
+            finally:
+                if stream is not None:
+                    try:
+                        if not completed:
+                            stream.abort()
+                        stream.stop()
+                        stream.close()
+                    except Exception as e:
+                        logger.debug(f"Error closing output stream: {e}")
+                self._playing = False
+            return completed
 
     def interrupt(self) -> None:
-        """Stop current playback immediately (for barge-in)."""
-        self._interrupt_flag.set()
-        sd.stop()
-        self._playing = False
-        logger.info("Playback interrupted")
+        """Stop current playback as soon as the next block boundary is reached."""
+        if self._playing:
+            logger.info("Playback interrupt requested")
+        self._interrupt.set()
+
+    def reset(self) -> None:
+        """Clear a pending interrupt before the next utterance."""
+        self._interrupt.clear()
 
     @property
     def is_playing(self) -> bool:
         return self._playing
 
-
-# ── Standalone test ─────────────────────────────────────────
-if __name__ == "__main__":
-    cfg.setup_logging()
-    print("🔊 Testing speaker output...")
-    print(f"   Sample rate: {cfg.audio.sample_rate} Hz")
-    print()
-
-    # Generate a simple test tone (440Hz sine wave, 1 second)
-    duration = 1.0
-    t = np.linspace(0, duration, int(cfg.audio.sample_rate * duration), dtype=np.float32)
-    tone = 0.3 * np.sin(2 * np.pi * 440 * t)
-
-    player = AudioOutput()
-    print("  Playing 440Hz test tone for 1 second...")
-    player.play(tone)
-    print("✅ Playback complete")
+    @property
+    def was_interrupted(self) -> bool:
+        return self._interrupt.is_set()

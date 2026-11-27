@@ -1,56 +1,45 @@
 # ============================================================
-# AI Voice Receptionist — Pinned Production Dependencies
+# AI Voice Receptionist — Runtime Dependencies
 # Python 3.11.x REQUIRED (3.11.9+ recommended)
 #
-# All versions pinned for reproducibility. Pre-built binary
-# wheels available for macOS (ARM/x86), Linux, and Windows.
-# Do NOT change without full compatibility testing.
+# Lower bounds + upper guards rather than hard pins: hard pins here
+# had already drifted from the installed environment (torch was pinned
+# to 2.5.1 while 2.10.0 was installed), which made the file misleading
+# rather than reproducible. Use `pip freeze > requirements.lock.txt`
+# for byte-exact reproduction of a known-good environment.
 # ============================================================
 
 # ---------- Core ----------
-python-dotenv==1.0.1
-fastapi==0.115.6
-uvicorn==0.32.1
+python-dotenv>=1.0.1,<2
 
 # ---------- Audio ----------
-sounddevice==0.5.1
-numpy==1.26.4               # last 1.x — max compat with torch/scipy/coqui
-scipy==1.14.1               # pre-built wheels for 3.11 on all platforms
-noisereduce==3.0.3
+sounddevice>=0.5.1,<0.6
+numpy>=1.26.4,<3
+scipy>=1.14.1,<2
+noisereduce>=3.0.3,<4
 
 # ---------- VAD ----------
-silero-vad==5.1.2
+silero-vad>=5.1.2,<6
 
 # ---------- PyTorch ----------
-torch==2.5.1                # LTS-grade; official 3.11 wheels all platforms
-torchaudio==2.5.1           # must match torch version
+torch>=2.5.1
+torchaudio>=2.5.1
 
 # ---------- STT ----------
-faster-whisper==1.1.0       # uses CTranslate2 4.x (3.11 wheels available)
+faster-whisper>=1.1.0,<2
 
 # ---------- TTS ----------
-coqui-tts==0.27.5           # XTTS v2; requires Python >=3.10,<3.15
+coqui-tts>=0.27.5,<1
 
 # ---------- LLM ----------
-google-genai==1.7.0
+google-genai>=1.7.0,<2
 
-# ---------- NLU / Transformers Stack ----------
-transformers==4.57.6        # DeBERTa v2/v3 + Joint NLU model support
-safetensors==0.7.0          # model weight loading (.safetensors format)
-tokenizers==0.22.2          # fast tokenizer backend for transformers
-sentencepiece==0.2.1        # DeBERTa v2 SentencePiece tokenizer
-huggingface-hub==0.36.2     # model download / push-to-hub
-accelerate>=0.26.0          # required by HF Trainer for device setup
+# ---------- NLU / Transformers stack ----------
+transformers>=4.45,<5
+safetensors>=0.4.5
+tokenizers>=0.20
+sentencepiece>=0.2.0
+huggingface-hub>=0.26
 
-# ---------- NLU / Slots ----------
-python-dateutil==2.9.0.post0  # date/time slot parsing
-
-# ---------- Training Scripts ----------
-# (not required for inference, only for scripts/)
-evaluate==0.4.6             # HuggingFace evaluation metrics
-seqeval==1.2.2              # sequence labeling evaluation (slot F1)
-scikit-learn==1.8.0         # train/test split, classification report
-
-# ---------- Testing ----------
-pytest==8.3.3
-pytest-asyncio==0.24.0
+# ---------- NLU / slot parsing ----------
+python-dateutil>=2.9.0

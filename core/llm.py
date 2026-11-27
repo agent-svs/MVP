@@ -1,114 +1,132 @@
 """
-LLM Integration — Google Gemini API Client
+LLM Integration — Google Gemini client.
 
-Provides:
-- Gemini client with env-configurable model, key, temp, max tokens
-- Prompt composer (system prompt + conversation history + user query)
-- Streaming token support (async)
-- Response shaper: strips markdown formatting for natural speech output
-
-Configurable via .env:
-  - GEMINI_API_KEY: your API key
-  - GEMINI_MODEL: model name (gemini-2.0-flash, gemini-2.5-pro, etc.)
-  - GEMINI_MAX_TOKENS: max output tokens
-  - GEMINI_TEMPERATURE: creativity control (0.0–2.0)
+Hardening over the previous version:
+  * a hard per-request timeout (a hung call used to stall the voice loop
+    forever, with the caller hearing silence)
+  * retries on 429 AND on 500/502/503/504 and transport errors, with
+    exponential backoff and jitter — previously only the literal string "429"
+    was matched, so a transient 503 propagated and killed the process
+  * `generate()` never raises. It returns a spoken fallback and an `ok` flag,
+    so one bad API call degrades a single turn instead of ending the call
+  * thinking disabled by default on gemini-2.5-* — it adds latency and
+    consumes max_output_tokens, which can leave zero tokens for the answer
+  * a grounding contract in the system prompt: state only what is in the
+    knowledge block, otherwise offer to check
 """
 
+from __future__ import annotations
+
 import logging
+import random
 import re
 import time
-from typing import AsyncIterator, Optional
+from dataclasses import dataclass
+from typing import Any, Iterator, Optional
 
 from config import cfg
+from core.nlu.entities import entity_store
 
 logger = logging.getLogger(__name__)
 
-# ── System prompt ──────────────────────────────────────────
-DEFAULT_SYSTEM_PROMPT = """You are Sarah, the friendly and professional AI medical receptionist for Apex Medical Clinic.
+MAX_HISTORY_MESSAGES = 12
 
-Your responsibilities:
-- Warmly welcome patients and handle their core needs regarding our medical services.
-- Help schedule, reschedule, or cancel patient appointments.
-- Answer basic questions about clinic policies, hours, and doctors.
-- Always maintain HIPAA-compliant professionalism, showing empathy to sick or anxious patients.
+# Errors worth retrying — transient server/transport problems.
+_RETRYABLE_CODES = (429, 500, 502, 503, 504)
+_RETRYABLE_MARKERS = (
+    "429", "500", "502", "503", "504", "rate limit", "resource_exhausted",
+    "unavailable", "deadline", "timeout", "timed out", "connection",
+    "temporarily", "overloaded", "internal error",
+)
 
-Clinic Knowledge base:
-- Doctors: Dr. Smith (General Practice), Dr. Patel (Cardiology), Dr. Lee (Pediatrics).
-- Operating Hours: Monday to Friday, 8:00 AM to 6:00 PM. Closed on weekends.
-- Address: 123 Healthway Drive, Suite 100.
-- Emergency policy: If a patient indicates a medical emergency, instruct them to hang up and dial 911 immediately.
-
-Conversation Guidelines:
-- Keep responses SHORT (1-3 sentences) — this is a voice conversation.
-- Sound warm, empathetic, and reassuring. Avoid robotic or overly complex phrasing.
-- Never use markdown formatting (no bold, bullets, headers) in your output.
-- Do NOT provide medical advice under any circumstance.
-- Confirm appointment details (Patient Name, Date, Time, Doctor, Service) before finalizing."""
+_FALLBACK_RESPONSE = (
+    "Sorry, I'm having trouble looking that up right now. "
+    "Could you try asking again, or would you like me to put you through to a colleague?"
+)
 
 
-# ── Response Shaper ────────────────────────────────────────
+def build_system_prompt() -> str:
+    """Compose the system prompt from config — one source of truth for facts."""
+    b = cfg.business
+    return f"""You are Sarah, the AI receptionist for {b.name}.
+
+CLINIC KNOWLEDGE (the ONLY facts you may state):
+- Doctors: {entity_store.doctor_roster_text()}
+- Opening hours: {b.hours_human}. Closed outside those hours.
+- Address: {b.address}
+- Services: {', '.join(entity_store.service_names())}
+
+WHAT YOU CAN DO:
+- You CAN book, cancel and reschedule appointments — the booking system does
+  this for you. Never tell a caller you are unable to book, or offer to hand
+  them to a colleague for scheduling. If details are missing, just ask for
+  them (service, date, time, patient name).
+
+GROUNDING CONTRACT — this is your most important rule:
+- You may ONLY state a fact that appears in CLINIC KNOWLEDGE above or in the
+  CONVERSATION CONTEXT supplied below.
+- If you are asked anything else (parking, insurance, wait times, prices,
+  specific availability, medical advice), you MUST NOT guess. Say you don't
+  have that information and offer to check with a colleague.
+- Never invent doctors, services, times, prices or policies.
+
+STYLE:
+- This is a phone call. Keep replies to 1-2 short sentences.
+- Warm, calm and professional. Never use markdown, bullets or emoji.
+- Never give medical advice. If someone describes an emergency, tell them to
+  hang up and dial 911 immediately.
+"""
+
+
 def shape_for_speech(text: str) -> str:
-    """
-    Clean LLM output for natural speech synthesis.
-
-    Strips markdown formatting, code blocks, URLs, and other
-    text artifacts that sound wrong when read aloud.
-    """
+    """Clean LLM output for natural speech synthesis."""
     if not text:
         return ""
-
     s = text
-
-    # Remove code blocks
     s = re.sub(r"```[\s\S]*?```", "", s)
     s = re.sub(r"`([^`]+)`", r"\1", s)
-
-    # Remove markdown headers
     s = re.sub(r"^#{1,6}\s+", "", s, flags=re.MULTILINE)
-
-    # Remove bold/italic
-    s = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", s)
-    s = re.sub(r"_{1,3}([^_]+)_{1,3}", r"\1", s)
-
-    # Remove markdown links: [text](url) → text
+    s = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", s, flags=re.DOTALL)
+    s = re.sub(r"_{1,3}(.+?)_{1,3}", r"\1", s, flags=re.DOTALL)
     s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)
-
-    # Remove bullet points and numbered lists
     s = re.sub(r"^\s*[-*•]\s+", "", s, flags=re.MULTILINE)
     s = re.sub(r"^\s*\d+\.\s+", "", s, flags=re.MULTILINE)
-
-    # Remove URLs
     s = re.sub(r"https?://\S+", "", s)
-
-    # Expand common abbreviations for speech
-    s = s.replace("&", "and")
+    s = s.replace("&", " and ")
     s = re.sub(r"\be\.g\.\s*", "for example ", s)
     s = re.sub(r"\bi\.e\.\s*", "that is ", s)
     s = s.replace(" etc.", " and so on")
-
-    # Clean up whitespace
     s = re.sub(r"\n{2,}", ". ", s)
     s = re.sub(r"\n", " ", s)
     s = re.sub(r"\s{2,}", " ", s)
-    s = s.strip()
-
-    # Remove trailing periods if duplicated
     s = re.sub(r"\.{2,}", ".", s)
+    return s.strip()
 
-    return s
+
+@dataclass
+class LLMResponse:
+    """Outcome of a generation attempt."""
+
+    text: str
+    elapsed: float
+    ok: bool = True
+    error: Optional[str] = None
+
+    # Legacy call sites unpack `text, elapsed = llm.generate(...)`.
+    def __iter__(self):
+        return iter((self.text, self.elapsed))
 
 
-# ── LLM Client ─────────────────────────────────────────────
+def _is_retryable(exc: Exception) -> bool:
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if isinstance(code, int) and code in _RETRYABLE_CODES:
+        return True
+    blob = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in blob for marker in _RETRYABLE_MARKERS)
+
+
 class LLM:
-    """
-    Google Gemini API client for conversational AI.
-
-    Features:
-    - Configurable model, temperature, and max tokens
-    - Conversation history management
-    - Streaming response support
-    - Response shaping for speech output
-    """
+    """Google Gemini client for conversational responses."""
 
     def __init__(
         self,
@@ -117,165 +135,210 @@ class LLM:
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         system_prompt: Optional[str] = None,
-    ):
-        self.api_key = api_key or cfg.llm.api_key
+    ) -> None:
+        # `or` would let an explicit empty string fall back to config,
+        # making the unconfigured path untestable.
+        self.api_key = api_key if api_key is not None else cfg.llm.api_key
         self.model_name = model or cfg.llm.model
         self.max_tokens = max_tokens or cfg.llm.max_tokens
         self.temperature = temperature if temperature is not None else cfg.llm.temperature
-        self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        self.system_prompt = system_prompt or build_system_prompt()
 
         self._client = None
-        self._history: list[dict[str, str]] = []
+        self._history: list[dict[str, Any]] = []
+
+    # ── client ──────────────────────────────────────────────
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.api_key) and self.api_key != "your-api-key-here"
 
     def _ensure_client(self) -> None:
-        """Initialize the Gemini client if not already done."""
         if self._client is not None:
             return
-
-        if not self.api_key or self.api_key == "your-api-key-here":
-            raise ValueError(
-                "GEMINI_API_KEY is not set. Please set it in your .env file."
-            )
-
+        if not self.is_configured:
+            raise ValueError("GEMINI_API_KEY is not set. Add it to your .env file.")
         from google import genai
+        from google.genai import types as genai_types
 
-        self._client = genai.Client(api_key=self.api_key)
-        logger.info(f"Gemini client initialized (model={self.model_name})")
+        self._client = genai.Client(
+            api_key=self.api_key,
+            http_options=genai_types.HttpOptions(timeout=int(cfg.llm.timeout_s * 1000)),
+        )
+        logger.info(
+            f"Gemini client ready (model={self.model_name}, timeout={cfg.llm.timeout_s}s)"
+        )
 
-    def _build_contents(self, user_message: str, context: Optional[dict] = None) -> tuple[list[dict], str]:
-        """Build the message list including history and dynamically updated system prompt."""
-        contents = []
+    def _build_config(self, sys_prompt: str):
+        from google.genai import types
 
-        # Add conversation history
-        for msg in self._history:
-            contents.append(msg)
+        kwargs: dict[str, Any] = dict(
+            system_instruction=sys_prompt,
+            max_output_tokens=self.max_tokens,
+            temperature=self.temperature,
+        )
+        # gemini-2.5-* think by default; that latency and token spend is not
+        # acceptable on a phone call, and it can consume the entire output
+        # budget leaving an empty response.
+        if "2.5" in self.model_name and cfg.llm.thinking_budget is not None:
+            try:
+                kwargs["thinking_config"] = types.ThinkingConfig(
+                    thinking_budget=cfg.llm.thinking_budget
+                )
+            except Exception as e:
+                logger.debug(f"ThinkingConfig unsupported for {self.model_name}: {e}")
+        return types.GenerateContentConfig(**kwargs)
 
-        # Add current user message
+    def _build_contents(
+        self, user_message: str, context: Optional[dict] = None
+    ) -> tuple[list[dict], str]:
+        contents = list(self._history)
         contents.append({"role": "user", "parts": [{"text": user_message}]})
-        
-        # Build dynamic system prompt with context
-        dynamic_prompt = self.system_prompt
+
+        prompt = self.system_prompt
         if context:
-            import json
-            context_str = json.dumps(context, indent=2)
-            dynamic_prompt += f"\n\nCURRENT CONVERSATION CONTEXT (Slots filled so far):\n{context_str}\n\nUse this context to inform your response. If a slot is filled, do not ask for it again."
+            lines = []
+            slots = {k: v for k, v in (context.get("slots") or {}).items() if v}
+            if slots:
+                lines.append(
+                    "Details already collected: "
+                    + ", ".join(f"{k.replace('_', ' ')}={v}" for k, v in slots.items())
+                )
+            if context.get("active_intent"):
+                lines.append(f"Caller is currently trying to: {context['active_intent']}")
+            if lines:
+                prompt += (
+                    "\n\nCONVERSATION CONTEXT:\n"
+                    + "\n".join(f"- {ln}" for ln in lines)
+                    + "\nDo not ask again for details already collected."
+                )
+        return contents, prompt
 
-        return contents, dynamic_prompt
-
+    # ── generation ──────────────────────────────────────────
     def generate(
         self,
         message: str,
         system_prompt: Optional[str] = None,
         shape: bool = True,
         context: Optional[dict] = None,
-    ) -> tuple[str, float]:
-        """
-        Generate a response from Gemini.
+    ) -> LLMResponse:
+        """Generate a response. Never raises — returns a spoken fallback instead."""
+        t0 = time.time()
 
-        Args:
-            message: User message text
-            system_prompt: Override system prompt for this call
-            shape: Whether to apply speech shaping
-            context: Optional dictionary of conversation state (e.g. active slots)
+        if not self.is_configured:
+            logger.error("LLM called without GEMINI_API_KEY")
+            return LLMResponse(_FALLBACK_RESPONSE, time.time() - t0, ok=False,
+                               error="missing_api_key")
 
-        Returns:
-            Tuple of (response_text, elapsed_seconds)
-        """
-        self._ensure_client()
-
-        from google.genai import types
+        try:
+            self._ensure_client()
+        except Exception as e:
+            logger.error(f"LLM client init failed: {e}")
+            return LLMResponse(_FALLBACK_RESPONSE, time.time() - t0, ok=False, error=str(e))
 
         contents, dynamic_prompt = self._build_contents(message, context)
         sys_prompt = system_prompt or dynamic_prompt
 
-        t0 = time.time()
-
-        # Retry with backoff for rate limits (429)
-        max_retries = 3
-        for attempt in range(max_retries):
+        response = None
+        last_error: Optional[Exception] = None
+        for attempt in range(1, cfg.llm.max_retries + 1):
             try:
                 response = self._client.models.generate_content(
                     model=self.model_name,
                     contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=sys_prompt,
-                        max_output_tokens=self.max_tokens,
-                        temperature=self.temperature,
-                    ),
+                    config=self._build_config(sys_prompt),
                 )
                 break
             except Exception as e:
-                if "429" in str(e) and attempt < max_retries - 1:
-                    wait = 5 * (attempt + 1)  # 5s, 10s, 15s
-                    logger.warning(f"Rate limited, retrying in {wait}s...")
-                    print(f"  ⏳ Rate limited, retrying in {wait}s...")
-                    time.sleep(wait)
-                else:
-                    raise
+                last_error = e
+                if attempt >= cfg.llm.max_retries or not _is_retryable(e):
+                    logger.error(f"LLM call failed ({type(e).__name__}): {e}")
+                    break
+                delay = cfg.llm.retry_base_delay_s * (2 ** (attempt - 1))
+                delay += random.uniform(0, delay * 0.25)  # jitter
+                logger.warning(
+                    f"LLM attempt {attempt}/{cfg.llm.max_retries} failed "
+                    f"({type(e).__name__}); retrying in {delay:.1f}s"
+                )
+                time.sleep(delay)
 
         elapsed = time.time() - t0
-        raw_text = response.text or ""
 
-        # Update history
-        self._history.append(
-            {"role": "user", "parts": [{"text": message}]}
-        )
-        self._history.append(
-            {"role": "model", "parts": [{"text": raw_text}]}
-        )
+        if response is None:
+            return LLMResponse(
+                _FALLBACK_RESPONSE, elapsed, ok=False,
+                error=str(last_error) if last_error else "no_response",
+            )
 
-        # Shape for speech
+        # Accessing .text raises when the candidate was safety-blocked or has
+        # no parts, so it is guarded rather than trusted.
+        try:
+            raw_text = response.text or ""
+        except (ValueError, AttributeError, IndexError):
+            raw_text = ""
+
+        if not raw_text.strip():
+            finish = None
+            try:
+                finish = response.candidates[0].finish_reason
+            except Exception:
+                pass
+            logger.warning(f"LLM returned no usable text (finish_reason={finish})")
+            return LLMResponse(
+                "Sorry, I didn't quite catch that. Could you say it another way?",
+                elapsed, ok=False, error=f"empty_response:{finish}",
+            )
+
+        self._history.append({"role": "user", "parts": [{"text": message}]})
+        self._history.append({"role": "model", "parts": [{"text": raw_text}]})
+        self._trim_history()
+
         text = shape_for_speech(raw_text) if shape else raw_text
+        logger.info(f"LLM ({elapsed:.2f}s): {message[:40]!r} -> {text[:60]!r}")
+        return LLMResponse(text, elapsed, ok=True)
 
-        logger.info(
-            f"LLM ({elapsed:.2f}s): \"{message[:40]}\" → \"{text[:60]}\""
-        )
-        return text, elapsed
-
-    async def generate_stream(
+    def generate_stream(
         self,
         message: str,
         system_prompt: Optional[str] = None,
         context: Optional[dict] = None,
-    ) -> AsyncIterator[str]:
+    ) -> Iterator[str]:
+        """Stream response chunks. Synchronous generator — the caller decides
+        whether to run it off the main thread.
+
+        (This was previously an `async def` that iterated a synchronous
+        iterator, which would have blocked the event loop; nothing called it.)
         """
-        Stream response tokens from Gemini.
+        if not self.is_configured:
+            yield _FALLBACK_RESPONSE
+            return
+        try:
+            self._ensure_client()
+            contents, dynamic_prompt = self._build_contents(message, context)
+            stream = self._client.models.generate_content_stream(
+                model=self.model_name,
+                contents=contents,
+                config=self._build_config(system_prompt or dynamic_prompt),
+            )
+            full = ""
+            for chunk in stream:
+                piece = getattr(chunk, "text", None)
+                if piece:
+                    full += piece
+                    yield piece
+            if full:
+                self._history.append({"role": "user", "parts": [{"text": message}]})
+                self._history.append({"role": "model", "parts": [{"text": full}]})
+                self._trim_history()
+        except Exception as e:
+            logger.error(f"LLM stream failed: {e}")
+            yield _FALLBACK_RESPONSE
 
-        Yields shaped text chunks as they arrive.
-        """
-        self._ensure_client()
-
-        from google.genai import types
-
-        contents, dynamic_prompt = self._build_contents(message, context)
-        sys_prompt = system_prompt or dynamic_prompt
-
-        response = self._client.models.generate_content_stream(
-            model=self.model_name,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=sys_prompt,
-                max_output_tokens=self.max_tokens,
-                temperature=self.temperature,
-            ),
-        )
-
-        full_text = ""
-        for chunk in response:
-            if chunk.text:
-                full_text += chunk.text
-                yield chunk.text
-
-        # Update history with full response
-        self._history.append(
-            {"role": "user", "parts": [{"text": message}]}
-        )
-        self._history.append(
-            {"role": "model", "parts": [{"text": full_text}]}
-        )
+    # ── history ─────────────────────────────────────────────
+    def _trim_history(self) -> None:
+        if len(self._history) > MAX_HISTORY_MESSAGES:
+            self._history = self._history[-MAX_HISTORY_MESSAGES:]
 
     def clear_history(self) -> None:
-        """Clear conversation history."""
         self._history.clear()
         logger.debug("Conversation history cleared")
 
@@ -286,42 +349,3 @@ class LLM:
     @property
     def is_initialized(self) -> bool:
         return self._client is not None
-
-
-# ── Standalone test (interactive REPL) ──────────────────────
-if __name__ == "__main__":
-    cfg.setup_logging()
-    print("💬 Gemini LLM — Interactive Test")
-    print(f"   Model: {cfg.llm.model}")
-    print(f"   Temp:  {cfg.llm.temperature}")
-    print(f"   Max tokens: {cfg.llm.max_tokens}")
-    print(f"   Type 'quit' to exit, 'clear' to reset history")
-    print()
-
-    llm = LLM()
-    turn = 0
-
-    while True:
-        try:
-            user_input = input("You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
-            break
-
-        if not user_input:
-            continue
-        if user_input.lower() in ("quit", "exit", "q"):
-            print("Goodbye!")
-            break
-        if user_input.lower() == "clear":
-            llm.clear_history()
-            turn = 0
-            print("  [History cleared]\n")
-            continue
-
-        turn += 1
-        try:
-            response, elapsed = llm.generate(user_input)
-            print(f"AI ({elapsed:.2f}s): {response}\n")
-        except Exception as e:
-            print(f"Error: {e}\n")

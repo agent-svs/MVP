@@ -1,24 +1,29 @@
 """
-Text-to-Speech — Coqui XTTS v2 Wrapper
+Text-to-Speech — Coqui XTTS v2 wrapper.
 
-Converts text to natural speech using XTTS v2.
-Supports both built-in speakers (58 voices) and voice cloning from a WAV file.
-Includes audio phrase caching for common responses (< 5ms for cached phrases).
+Two behaviours worth calling out:
 
-Configurable via .env:
-  - TTS_MODEL: model identifier
-  - TTS_SPEAKER: built-in speaker name (e.g. "Daisy Studious")
-  - TTS_SPEAKER_WAV: reference voice WAV for cloning (overrides TTS_SPEAKER)
-  - TTS_LANGUAGE: output language
-  - DEVICE: cpu / mps / cuda
+  * `synthesize_stream` is genuinely pipelined. A background thread synthesises
+    sentence N+1 while the caller is still playing sentence N. The previous
+    version synthesised, yielded, then waited for playback to finish before
+    starting the next sentence — so it carried the complexity of streaming with
+    none of the latency benefit.
+
+  * The phrase cache only stores text with no caller data in it. Caching
+    personalised responses wrote patient names to disk as audio files, forever,
+    for a near-zero hit rate.
 """
+
+from __future__ import annotations
 
 import hashlib
 import logging
 import os
+import queue
+import re
+import threading
 import time
-from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 import numpy as np
 
@@ -26,21 +31,44 @@ from config import cfg
 
 logger = logging.getLogger(__name__)
 
-# Default built-in speaker when no speaker_wav is provided
-DEFAULT_SPEAKER = "Daisy Studious"
+# XTTS is unstable above ~250 characters per call.
+_MAX_CHARS = 200
+
+# A phrase is cacheable only if it looks fully generic. Anything containing a
+# digit (dates, times, phone numbers) or a capitalised word that isn't a known
+# safe word is treated as caller-specific and never written to disk.
+_SAFE_CAPITALISED = {
+    "i", "i'm", "i'll", "i've", "ok", "okay", "sure", "hello", "hi", "hey",
+    "good", "great", "thanks", "thank", "welcome", "bye", "goodbye", "sorry",
+    "what", "which", "when", "where", "who", "how", "could", "would", "may",
+    "and", "the", "a", "an", "is", "it", "no", "yes", "just", "one", "let",
+    "do", "does", "did", "can", "shall", "we", "you", "your", "our", "my",
+    "that", "this", "there", "here", "for", "to", "of", "on", "at", "in",
+}
+
+
+def _is_cacheable(text: str) -> bool:
+    """True only when `text` contains no caller-specific information."""
+    if not cfg.tts.cache_enabled:
+        return False
+    if any(ch.isdigit() for ch in text):
+        return False
+    words = re.findall(r"[A-Za-z']+", text)
+    for i, w in enumerate(words):
+        if not w[:1].isupper():
+            continue
+        if i == 0:
+            continue  # sentence-initial capital is fine
+        if w.lower() in _SAFE_CAPITALISED:
+            continue
+        if w.lower() in cfg.business.name.lower().split():
+            continue
+        return False  # a proper noun we don't recognise → probably a name
+    return True
 
 
 class TTS:
-    """
-    Text-to-Speech using Coqui XTTS v2.
-
-    Two modes:
-    1. Built-in speaker: Set TTS_SPEAKER in .env (no WAV needed)
-    2. Voice cloning: Set TTS_SPEAKER_WAV to a 6-15s reference WAV
-
-    If TTS_SPEAKER_WAV exists, voice cloning is used. Otherwise, falls back
-    to the built-in speaker specified by TTS_SPEAKER.
-    """
+    """Text-to-Speech using Coqui XTTS v2."""
 
     def __init__(
         self,
@@ -49,96 +77,102 @@ class TTS:
         speaker_wav: Optional[str] = None,
         language: Optional[str] = None,
         device: Optional[str] = None,
-    ):
+    ) -> None:
         self.model_name = model_name or cfg.tts.model
         self.language = language or cfg.tts.language
         self.device = device or cfg.device
         self.speaker = speaker or cfg.tts.speaker
 
-        # Resolve speaker wav path relative to project root
-        raw_speaker_wav = speaker_wav or cfg.tts.speaker_wav
-        if raw_speaker_wav and not os.path.isabs(raw_speaker_wav):
-            resolved = str(cfg.project_root / raw_speaker_wav)
-        else:
-            resolved = raw_speaker_wav or ""
-
-        # Only use speaker_wav if the file actually exists
+        raw = speaker_wav or cfg.tts.speaker_wav
+        resolved = (
+            str(cfg.project_root / raw) if raw and not os.path.isabs(raw) else (raw or "")
+        )
         self.speaker_wav = resolved if resolved and os.path.exists(resolved) else None
 
-        # Cache directory
         self._cache_dir = cfg.project_root / "assets" / "cache"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Model (lazy loaded)
         self._model = None
-        self._sample_rate: int = 24000  # XTTS v2 default output rate
+        self._sample_rate: int = 24000  # replaced with the model's real rate on load
+        self._lock = threading.Lock()
 
+    # ── loading ─────────────────────────────────────────────
     def load(self) -> None:
-        """Load the XTTS v2 model. Call once at startup."""
+        """Load the XTTS model. Call once at startup."""
         from TTS.api import TTS as CoquiTTS
 
         logger.info(f"Loading TTS model: {self.model_name} (device={self.device})")
         t0 = time.time()
+        self._model = CoquiTTS(model_name=self.model_name, progress_bar=False)
+        try:
+            self._model.to(self.device)
+        except Exception as e:
+            logger.warning(f"Could not move TTS to {self.device} ({e}); staying on CPU")
+            self.device = "cpu"
 
-        self._model = CoquiTTS(
-            model_name=self.model_name,
-            progress_bar=False,
-        )
-        self._model.to(self.device)
+        # Read the real output rate instead of assuming 24000.
+        for attr in ("output_sample_rate", "sample_rate"):
+            rate = getattr(getattr(self._model, "synthesizer", None), attr, None)
+            if isinstance(rate, int) and rate > 0:
+                self._sample_rate = rate
+                break
 
-        elapsed = time.time() - t0
+        mode = f"voice cloning from {self.speaker_wav}" if self.speaker_wav else \
+               f"built-in speaker '{self.speaker}'"
+        logger.info(f"TTS loaded in {time.time() - t0:.1f}s @ {self._sample_rate}Hz — {mode}")
 
-        # Log which voice mode we're using
-        if self.speaker_wav:
-            logger.info(f"TTS loaded in {elapsed:.1f}s — voice cloning from {self.speaker_wav}")
-        else:
-            logger.info(f"TTS loaded in {elapsed:.1f}s — using built-in speaker: {self.speaker}")
-
+    # ── cache ───────────────────────────────────────────────
     def _cache_key(self, text: str) -> str:
-        """Generate a cache key from text + voice config."""
         voice_id = self.speaker_wav or self.speaker
-        return hashlib.md5(
-            f"{text}:{self.language}:{voice_id}".encode()
-        ).hexdigest()
+        return hashlib.sha256(
+            f"{text}:{self.language}:{voice_id}:{self._sample_rate}".encode()
+        ).hexdigest()[:32]
 
     def _check_cache(self, text: str) -> Optional[np.ndarray]:
-        """Check if synthesized audio is cached."""
-        key = self._cache_key(text)
-        cache_path = self._cache_dir / f"{key}.npy"
-        if cache_path.exists():
-            logger.debug(f"TTS cache hit: '{text[:40]}...'")
-            return np.load(str(cache_path))
+        path = self._cache_dir / f"{self._cache_key(text)}.npy"
+        if path.exists():
+            try:
+                logger.debug(f"TTS cache hit: {text[:40]!r}")
+                return np.load(str(path), allow_pickle=False)
+            except Exception as e:
+                logger.debug(f"Corrupt TTS cache entry {path.name}: {e}")
+                path.unlink(missing_ok=True)
         return None
 
     def _save_cache(self, text: str, audio: np.ndarray) -> None:
-        """Save synthesized audio to cache."""
-        key = self._cache_key(text)
-        cache_path = self._cache_dir / f"{key}.npy"
-        np.save(str(cache_path), audio)
-        logger.debug(f"TTS cached: '{text[:40]}...'")
+        try:
+            self._evict_if_needed()
+            np.save(str(self._cache_dir / f"{self._cache_key(text)}.npy"), audio)
+        except Exception as e:
+            logger.debug(f"Could not write TTS cache: {e}")
 
+    def _evict_if_needed(self) -> None:
+        files = sorted(self._cache_dir.glob("*.npy"), key=lambda f: f.stat().st_mtime)
+        excess = len(files) - cfg.tts.cache_max_files
+        for f in files[:max(0, excess)]:
+            f.unlink(missing_ok=True)
+
+    def clear_cache(self) -> int:
+        count = 0
+        for f in self._cache_dir.glob("*.npy"):
+            f.unlink(missing_ok=True)
+            count += 1
+        logger.info(f"Cleared {count} cached TTS files")
+        return count
+
+    # ── synthesis ───────────────────────────────────────────
     def synthesize(
         self,
         text: str,
         language: Optional[str] = None,
         use_cache: bool = True,
     ) -> tuple[np.ndarray, int, float]:
-        """
-        Convert text to speech audio.
-
-        Args:
-            text: Text to synthesize
-            language: Override language
-            use_cache: Whether to use/save phrase cache
-
-        Returns:
-            Tuple of (audio_array, sample_rate, elapsed_seconds)
-        """
+        """Convert text to speech. Returns (audio, sample_rate, elapsed)."""
         if not text or not text.strip():
             return np.array([], dtype=np.float32), self._sample_rate, 0.0
 
-        # Check cache first
-        if use_cache:
+        cacheable = use_cache and _is_cacheable(text)
+        if cacheable:
             cached = self._check_cache(text)
             if cached is not None:
                 return cached, self._sample_rate, 0.0
@@ -148,32 +182,27 @@ class TTS:
 
         lang = language or self.language
         t0 = time.time()
-
-        # Use speaker_wav for voice cloning, or built-in speaker name
-        if self.speaker_wav:
-            audio_list = self._model.tts(
-                text=text,
-                language=lang,
-                speaker_wav=self.speaker_wav,
-            )
-        else:
-            audio_list = self._model.tts(
-                text=text,
-                language=lang,
-                speaker=self.speaker,
-            )
+        try:
+            with self._lock:
+                kwargs = {"text": text, "language": lang}
+                if self.speaker_wav:
+                    kwargs["speaker_wav"] = self.speaker_wav
+                else:
+                    kwargs["speaker"] = self.speaker
+                audio_list = self._model.tts(**kwargs)
+        except Exception as e:
+            logger.error(f"TTS synthesis failed for {text[:60]!r}: {e}")
+            return np.array([], dtype=np.float32), self._sample_rate, time.time() - t0
 
         elapsed = time.time() - t0
-        audio = np.array(audio_list, dtype=np.float32)
+        audio = np.asarray(audio_list, dtype=np.float32)
 
         logger.info(
-            f"TTS ({elapsed:.2f}s): \"{text[:50]}\" "
-            f"[{len(audio)} samples, {len(audio)/self._sample_rate:.1f}s audio]"
+            f"TTS ({elapsed:.2f}s): {text[:50]!r} "
+            f"[{len(audio)/max(self._sample_rate,1):.1f}s audio]"
         )
-
-        if use_cache:
+        if cacheable and len(audio):
             self._save_cache(text, audio)
-
         return audio, self._sample_rate, elapsed
 
     def synthesize_stream(
@@ -181,65 +210,90 @@ class TTS:
         text: str,
         language: Optional[str] = None,
         use_cache: bool = True,
-    ):
-        """
-        Stream TTS sentence-by-sentence.
+    ) -> Iterator[tuple[np.ndarray, int]]:
+        """Yield (audio, sample_rate) per sentence, synthesising ahead.
 
-        Splits text into sentences and yields each one as it's synthesized.
-        The caller can start playing the first sentence while remaining
-        sentences are still being synthesized.
-
-        Args:
-            text: Full text to synthesize
-            language: Override language
-            use_cache: Whether to use/save per-sentence cache
-
-        Yields:
-            Tuple of (audio_array, sample_rate) for each sentence
+        A worker thread stays one or two sentences in front of the consumer, so
+        playback of sentence N overlaps synthesis of N+1.
         """
         if not text or not text.strip():
             return
-
         sentences = self._split_into_sentences(text)
         if not sentences:
             return
-
-        # If only one sentence, just synthesize directly
         if len(sentences) == 1:
             audio, sr, _ = self.synthesize(sentences[0], language, use_cache)
-            if len(audio) > 0:
+            if len(audio):
                 yield audio, sr
             return
 
-        # Synthesize and yield each sentence
-        for i, sentence in enumerate(sentences):
-            audio, sr, elapsed = self.synthesize(sentence, language, use_cache)
-            if len(audio) > 0:
-                logger.debug(
-                    f"Stream chunk {i+1}/{len(sentences)}: "
-                    f"\"{sentence[:40]}\" ({elapsed:.2f}s)"
-                )
-                yield audio, sr
+        out_q: "queue.Queue" = queue.Queue(maxsize=2)
+        _SENTINEL = object()
+
+        def worker() -> None:
+            try:
+                for i, sentence in enumerate(sentences):
+                    audio, sr, elapsed = self.synthesize(sentence, language, use_cache)
+                    if len(audio):
+                        logger.debug(
+                            f"Stream chunk {i+1}/{len(sentences)} ready ({elapsed:.2f}s)"
+                        )
+                        out_q.put((audio, sr))
+            except Exception as e:
+                logger.error(f"TTS stream worker failed: {e}")
+            finally:
+                out_q.put(_SENTINEL)
+
+        thread = threading.Thread(target=worker, name="tts-stream", daemon=True)
+        thread.start()
+        try:
+            while True:
+                item = out_q.get()
+                if item is _SENTINEL:
+                    break
+                yield item
+        finally:
+            # Drain so the worker can exit if the consumer stopped early
+            # (barge-in), then let the daemon thread finish.
+            while not out_q.empty():
+                try:
+                    out_q.get_nowait()
+                except queue.Empty:
+                    break
 
     @staticmethod
     def _split_into_sentences(text: str) -> list[str]:
-        """Split text into sentences for streaming synthesis."""
-        import re
-        # Split on sentence-ending punctuation followed by space or end
-        parts = re.split(r'(?<=[.!?])\s+', text.strip())
-        # Also split very long sentences on commas (XTTS limit ~250 chars)
-        result = []
+        """Split into speakable chunks, respecting XTTS's length limit."""
+        parts = re.split(r'(?<=[.!?])\s+', (text or "").strip())
+        result: list[str] = []
         for part in parts:
             part = part.strip()
             if not part:
                 continue
-            if len(part) > 200:
-                # Split on commas for very long sentences
-                sub_parts = re.split(r',\s+', part)
-                result.extend(sp.strip() for sp in sub_parts if sp.strip())
-            else:
+            if len(part) <= _MAX_CHARS:
                 result.append(part)
-        return result
+                continue
+            # Split long sentences on commas, then hard-wrap on word
+            # boundaries so a comma-less run can never exceed the XTTS limit.
+            buf = ""
+            for piece in re.split(r',\s+', part):
+                candidate = f"{buf}, {piece}" if buf else piece
+                if len(candidate) <= _MAX_CHARS:
+                    buf = candidate
+                    continue
+                if buf:
+                    result.append(buf)
+                    buf = ""
+                while len(piece) > _MAX_CHARS:
+                    cut = piece.rfind(" ", 0, _MAX_CHARS)
+                    if cut <= 0:
+                        cut = _MAX_CHARS
+                    result.append(piece[:cut].strip())
+                    piece = piece[cut:].strip()
+                buf = piece
+            if buf:
+                result.append(buf)
+        return [r for r in result if r.strip()]
 
     @property
     def sample_rate(self) -> int:
@@ -248,51 +302,3 @@ class TTS:
     @property
     def is_loaded(self) -> bool:
         return self._model is not None
-
-    def clear_cache(self) -> int:
-        """Clear all cached audio files. Returns number of files removed."""
-        count = 0
-        for f in self._cache_dir.glob("*.npy"):
-            f.unlink()
-            count += 1
-        logger.info(f"Cleared {count} cached TTS files")
-        return count
-
-
-# ── Standalone test ─────────────────────────────────────────
-if __name__ == "__main__":
-    from core.audio_output import AudioOutput
-
-    cfg.setup_logging()
-    print("🔊 Testing TTS — Coqui XTTS v2")
-    print(f"   Model:    {cfg.tts.model}")
-    print(f"   Speaker:  {cfg.tts.speaker}")
-    print(f"   Language: {cfg.tts.language}")
-    print(f"   Device:   {cfg.device}")
-    print()
-
-    tts = TTS()
-    tts.load()
-
-    player = AudioOutput()
-
-    test_phrases = [
-        "Hello Swayam Vyas! Welcome to our office. How can I help you today?",
-        "Your appointment is confirmed for tomorrow at 3 PM.",
-        "Let me check that for you. One moment please.",
-    ]
-
-    for i, phrase in enumerate(test_phrases, 1):
-        print(f"\n  [{i}] Synthesizing: \"{phrase}\"")
-        audio, sr, elapsed = tts.synthesize(phrase)
-        print(f"      Generated {len(audio)/sr:.1f}s audio in {elapsed:.2f}s")
-        print(f"      Playing...")
-        player.play(audio, sample_rate=sr)
-
-    # Test cache hit
-    print(f"\n  [Cache test] Re-synthesizing first phrase...")
-    audio, sr, elapsed = tts.synthesize(test_phrases[0])
-    print(f"      Cache hit! Elapsed: {elapsed:.4f}s")
-    player.play(audio, sample_rate=sr)
-
-    print("\n✅ TTS test complete")
